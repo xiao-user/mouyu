@@ -1,0 +1,18 @@
+const IPC_CHANNELS = {
+  setAlwaysOnTop: 'set-always-on-top',
+  windowMinimize: 'window-min',
+  windowClose: 'window-close',
+  changeIcon: 'change-icon',
+  listCamouflageIcons: 'list-camouflage-icons',
+  toggleTransparency: 'toggle-transparency',
+  toggleBookmarks: 'toggle-bookmarks',
+  goBack: 'go-back',
+  goForward: 'go-forward',
+  checkForUpdates: 'check-for-updates',
+  activateLicense: 'activate-license',
+  getLicenseStatus: 'get-license-status',
+};
+
+module.exports = {
+  IPC_CHANNELS,
+};
