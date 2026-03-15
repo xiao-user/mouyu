@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAlwaysOnTop: (flag) => ipcRenderer.send(IPC_CHANNELS.setAlwaysOnTop, flag),
   changeIcon: (iconPath) => ipcRenderer.send(IPC_CHANNELS.changeIcon, iconPath),
   listCamouflageIcons: () => ipcRenderer.invoke(IPC_CHANNELS.listCamouflageIcons),
+  getCamouflageIconPreview: (iconPath) => ipcRenderer.invoke(IPC_CHANNELS.getCamouflageIconPreview, iconPath),
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.checkForUpdates),
   activateLicense: (licenseKey) => ipcRenderer.invoke(IPC_CHANNELS.activateLicense, licenseKey),
   getLicenseStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getLicenseStatus),

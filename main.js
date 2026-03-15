@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { IPC_CHANNELS } = require('./ipc-channels');
@@ -40,6 +40,37 @@ async function listCamouflageIcons() {
     .map((entry) => path.join(appLogoDir, entry.name))
     .filter((filePath) => SUPPORTED_ICON_EXTENSIONS.has(path.extname(filePath).toLowerCase()))
     .sort();
+}
+
+function getImageMimeTypeByExtension(iconPath) {
+  const ext = path.extname(iconPath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.png') return 'image/png';
+  return '';
+}
+
+function getCamouflageIconPreviewDataUrl(iconPath) {
+  if (!isSafeIconPath(iconPath)) return '';
+
+  try {
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) {
+      return image.resize({ width: 64, height: 64 }).toDataURL();
+    }
+  } catch (error) {
+    console.error('Failed to generate native image preview:', error);
+  }
+
+  try {
+    const mimeType = getImageMimeTypeByExtension(iconPath);
+    if (!mimeType) return '';
+    const data = fs.readFileSync(iconPath);
+    return `data:${mimeType};base64,${data.toString('base64')}`;
+  } catch (error) {
+    console.error('Failed to generate fallback image preview:', error);
+  }
+
+  return '';
 }
 
 function getLicenseFilePath() {
@@ -278,6 +309,15 @@ ipcMain.handle(IPC_CHANNELS.listCamouflageIcons, async () => {
   } catch (error) {
     console.error('Failed to list camouflage icons:', error);
     return [];
+  }
+});
+
+ipcMain.handle(IPC_CHANNELS.getCamouflageIconPreview, async (event, iconPath) => {
+  try {
+    return getCamouflageIconPreviewDataUrl(iconPath);
+  } catch (error) {
+    console.error('Failed to get camouflage icon preview:', error);
+    return '';
   }
 });
 

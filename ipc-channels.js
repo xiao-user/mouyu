@@ -4,6 +4,7 @@ const IPC_CHANNELS = {
   windowClose: 'window-close',
   changeIcon: 'change-icon',
   listCamouflageIcons: 'list-camouflage-icons',
+  getCamouflageIconPreview: 'get-camouflage-icon-preview',
   toggleTransparency: 'toggle-transparency',
   toggleBookmarks: 'toggle-bookmarks',
   goBack: 'go-back',

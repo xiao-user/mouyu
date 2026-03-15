@@ -1,17 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Search } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { ColorPickerField } from '@/components/color-picker-field';
 import {
   Dialog,
   DialogContent,
@@ -38,6 +30,8 @@ import iconRemoveBackgroundRaw from '@/assets/icons/header/IconRemoveBackground2
 import iconSettingsRaw from '@/assets/icons/header/IconSettings.svg?raw';
 import iconSunRaw from '@/assets/icons/header/IconSun.svg?raw';
 import iconTransparentRaw from '@/assets/icons/header/IconTransparent.svg?raw';
+import iconBookmarkEditRaw from '@/assets/icons/bookmarks/IconPageEdit.svg?raw';
+import iconBookmarkDeleteRaw from '@/assets/icons/bookmarks/IconTrashCan.svg?raw';
 
 const TOOLBAR_REVEAL_ZONE = 56;
 const HEADER_PANEL_STYLE_DARK = {
@@ -89,11 +83,55 @@ const HEADER_ICON_SVGS = {
   pin: normalizeHeaderSvg(iconPinRaw),
   ghost: normalizeHeaderSvg(iconGhostRaw),
 };
+const BOOKMARK_ACTION_ICON_SVGS = {
+  edit: normalizeHeaderSvg(iconBookmarkEditRaw),
+  delete: normalizeHeaderSvg(iconBookmarkDeleteRaw),
+};
 function HeaderSvgIcon({
   svg,
   className = 'header-icon-micro inline-block h-4 w-4 shrink-0 align-middle [&>svg]:block [&>svg]:h-full [&>svg]:w-full',
 }) {
   return <span aria-hidden className={className} dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+function getBookmarkHostname(rawUrl) {
+  try {
+    const normalized = normalizeUrl(rawUrl);
+    if (!normalized) return '';
+    return new URL(normalized).hostname || '';
+  } catch {
+    return '';
+  }
+}
+
+function getBookmarkInitial(name, url) {
+  const source = String(name || getBookmarkHostname(url) || '?').trim();
+  return source ? source.charAt(0).toUpperCase() : '?';
+}
+
+function BookmarkFavicon({ name, url }) {
+  const [failed, setFailed] = useState(false);
+  const host = useMemo(() => getBookmarkHostname(url), [url]);
+  const faviconUrl = host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : '';
+  const fallbackText = useMemo(() => getBookmarkInitial(name, url), [name, url]);
+
+  if (!faviconUrl || failed) {
+    return (
+      <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+        {fallbackText}
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={faviconUrl}
+      alt=""
+      className="h-8 w-8 shrink-0 rounded-md border border-border/70 bg-background object-cover"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 const STORAGE_KEYS = {
@@ -131,6 +169,7 @@ const electronBridge = window.electronAPI ?? {
   setAlwaysOnTop: noop,
   changeIcon: noop,
   listCamouflageIcons: async () => [],
+  getCamouflageIconPreview: async () => '',
   checkForUpdates: async () => ({ ok: false, message: '更新功能不可用。' }),
   activateLicense: async () => ({ ok: false, message: '激活功能不可用。' }),
   getLicenseStatus: async () => ({ activated: false, maskedKey: '', activatedAt: '' }),
@@ -178,6 +217,17 @@ function isHexColor(value) {
 function getFileNameFromPath(filePath) {
   const parts = String(filePath).split(/[\\/]/);
   return parts[parts.length - 1] || String(filePath);
+}
+
+function normalizeCamouflageIcon(pathValue, previewSrc = '') {
+  const safePath = typeof pathValue === 'string' ? pathValue.trim() : '';
+  if (!safePath) return null;
+
+  return {
+    path: safePath,
+    name: getFileNameFromPath(safePath),
+    previewSrc: typeof previewSrc === 'string' ? previewSrc : '',
+  };
 }
 
 function isWebviewLifecycleError(error) {
@@ -230,8 +280,8 @@ export default function App() {
   const [bookmarkSearch, setBookmarkSearch] = useState('');
   const [bookmarkName, setBookmarkName] = useState('');
   const [bookmarkUrl, setBookmarkUrl] = useState('');
+  const [isAddingBookmark, setIsAddingBookmark] = useState(false);
   const [editingIndex, setEditingIndex] = useState(-1);
-  const [deleteBookmarkIndex, setDeleteBookmarkIndex] = useState(null);
 
   const [hideScrollbar, setHideScrollbar] = useState(readBool(STORAGE_KEYS.hideScrollbar, false));
   const [textColor, setTextColor] = useState(() => {
@@ -676,8 +726,26 @@ export default function App() {
   const loadCamouflageIcons = useCallback(async () => {
     try {
       const paths = await electronBridge.listCamouflageIcons();
-      setIconPaths(Array.isArray(paths) ? paths : []);
-      if (selectedIcon && Array.isArray(paths) && !paths.includes(selectedIcon)) {
+      const safePaths = Array.isArray(paths)
+        ? paths.filter((item) => typeof item === 'string' && item.trim() !== '')
+        : [];
+
+      const previewEntries = await Promise.all(
+        safePaths.map(async (iconPath) => {
+          try {
+            const previewSrc = await electronBridge.getCamouflageIconPreview(iconPath);
+            return normalizeCamouflageIcon(iconPath, previewSrc);
+          } catch (error) {
+            console.error('[renderer:getCamouflageIconPreview]', error);
+            return normalizeCamouflageIcon(iconPath, '');
+          }
+        })
+      );
+
+      const normalizedEntries = previewEntries.filter(Boolean);
+      setIconPaths(normalizedEntries);
+
+      if (selectedIcon && !safePaths.includes(selectedIcon)) {
         setSelectedIcon('');
         localStorage.removeItem(STORAGE_KEYS.appIcon);
       }
@@ -776,6 +844,13 @@ export default function App() {
     localStorage.setItem(STORAGE_KEYS.darkMode, String(darkMode));
     applyDarkModeToWebview();
   }, [darkMode, applyDarkModeToWebview]);
+
+  useEffect(() => {
+    // Keep UI theme direction aligned with existing darkMode semantics used by webview rendering.
+    const isUiDark = !darkMode;
+    document.documentElement.classList.toggle('dark', isUiDark);
+    document.body.classList.toggle('dark', isUiDark);
+  }, [darkMode]);
 
   useEffect(() => {
     if (!hasXhsEnhanceEnabled) return;
@@ -1135,17 +1210,45 @@ export default function App() {
   }, [bookmarks, bookmarkSearch]);
 
   const resetBookmarkEditor = useCallback(() => {
+    setIsAddingBookmark(false);
     setEditingIndex(-1);
     setBookmarkName('');
     setBookmarkUrl('');
   }, []);
 
+  const startBookmarkAdd = useCallback(() => {
+    setIsAddingBookmark(true);
+    setEditingIndex(-1);
+    setBookmarkName('');
+    setBookmarkUrl('');
+  }, []);
+
+  const startBookmarkEdit = useCallback(
+    (index) => {
+      const target = bookmarks[index];
+      if (!target) return;
+      setIsAddingBookmark(false);
+      setEditingIndex(index);
+      setBookmarkName(target.name || '');
+      setBookmarkUrl(target.url || '');
+    },
+    [bookmarks]
+  );
+
   const handleBookmarkSubmit = useCallback(() => {
     const name = bookmarkName.trim();
-    const url = bookmarkUrl.trim();
+    const rawUrl = bookmarkUrl.trim();
+    const url = normalizeUrl(rawUrl);
 
     if (!name || !url) {
       showRuntimeAlert('请输入名称和网址');
+      return;
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      showRuntimeAlert('请输入有效网址');
       return;
     }
 
@@ -1161,6 +1264,22 @@ export default function App() {
     resetBookmarkEditor();
   }, [bookmarkName, bookmarkUrl, editingIndex, showRuntimeAlert, resetBookmarkEditor]);
 
+  const handleBookmarkEditorKeyDown = useCallback(
+    (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        handleBookmarkSubmit();
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        resetBookmarkEditor();
+      }
+    },
+    [handleBookmarkSubmit, resetBookmarkEditor]
+  );
+
   const handleBookmarkDelete = useCallback(
     (index) => {
       setBookmarks((prev) => prev.filter((_, currentIndex) => currentIndex !== index));
@@ -1170,7 +1289,6 @@ export default function App() {
       } else if (editingIndex > index) {
         setEditingIndex((prev) => prev - 1);
       }
-      setDeleteBookmarkIndex(null);
     },
     [editingIndex, resetBookmarkEditor]
   );
@@ -1222,7 +1340,7 @@ export default function App() {
 
   return (
     <div
-      className={`relative h-full w-full ${darkMode ? 'dark' : ''}`}
+      className="relative h-full w-full"
       style={{ opacity: containerOpacity, background: 'transparent' }}
     >
       {runtimeAlert.visible ? (
@@ -1465,163 +1583,145 @@ export default function App() {
           if (open) setSettingsTab('appearance');
         }}
       >
-        <DialogContent className="max-h-[92vh] max-w-[calc(100vw-20px)] overflow-auto p-0 sm:max-w-[calc(100vw-20px)]">
-          <div className="grid min-h-[70vh] grid-cols-1 gap-0 lg:grid-cols-[260px_1fr]">
-            <aside className="border-b bg-muted/20 p-4 lg:border-b-0 lg:border-r">
-              <h2 className="mb-4 text-xl font-semibold">Control Deck</h2>
-              <Tabs value={settingsTab} onValueChange={setSettingsTab} orientation="vertical" className="w-full">
-                <TabsList className="grid h-auto w-full grid-cols-2 gap-2 bg-transparent p-0 lg:grid-cols-1">
-                  <TabsTrigger value="appearance" className="justify-start">外观与通用</TabsTrigger>
-                  <TabsTrigger value="reading" className="justify-start">阅读增强</TabsTrigger>
-                  <TabsTrigger value="xhs" className="justify-start">小红书场景</TabsTrigger>
-                  <TabsTrigger value="update" className="justify-start">更新与激活</TabsTrigger>
-                  <TabsTrigger value="shortcut" className="justify-start">快捷键总览</TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </aside>
+        <DialogContent className="overflow-auto sm:max-h-[92vh] sm:w-full sm:max-w-[1100px]">
+          <DialogHeader className="block h-auto text-left">
+            <DialogTitle>设置中心</DialogTitle>
+            <DialogDescription>统一管理外观、阅读增强、小红书场景、更新与快捷键。</DialogDescription>
+          </DialogHeader>
 
-            <section className="p-4">
-              <div className="mb-4">
-                <h2 className="text-xl font-semibold">设置页</h2>
-                <p className="text-sm text-muted-foreground">全部控件已统一到 shadcn，逻辑由 React 状态管理。</p>
-              </div>
+          <Tabs value={settingsTab} onValueChange={setSettingsTab} className="space-y-4">
+            <TabsList className="grid h-auto w-full grid-cols-3">
+              <TabsTrigger value="appearance" className="w-full">外观</TabsTrigger>
+              <TabsTrigger value="enhance" className="w-full">增强</TabsTrigger>
+              <TabsTrigger value="system" className="w-full">系统</TabsTrigger>
+            </TabsList>
 
-              <Tabs value={settingsTab} onValueChange={setSettingsTab}>
-                <TabsContent value="appearance" className="space-y-4">
-                  <Card className="space-y-3 p-4">
-                    <h3 className="text-base font-semibold">伪装图标 (Dock栏)</h3>
-                    <div className="grid grid-cols-5 gap-3">
-                      {iconPaths.map((iconPath) => (
-                        <Button
-                          key={iconPath}
-                          variant={selectedIcon === iconPath ? 'secondary' : 'outline'}
-                          className="h-16 p-2"
-                          onClick={() => setSelectedIcon(iconPath)}
-                          title={getFileNameFromPath(iconPath)}
-                        >
-                          <img src={iconPath} alt={getFileNameFromPath(iconPath)} className="h-10 w-10 object-contain" />
-                        </Button>
-                      ))}
-                    </div>
-                  </Card>
+            <TabsContent value="appearance" className="space-y-4">
+              <Card className="space-y-3 p-4">
+                <h3 className="text-base font-semibold">伪装图标 (Dock栏)</h3>
+                <div className="flex flex-wrap gap-x-2 gap-y-4">
+                  {iconPaths.map((iconItem) => (
+                    <Button
+                      key={iconItem.path}
+                      variant={selectedIcon === iconItem.path ? 'secondary' : 'outline'}
+                      className="h-16 w-16 rounded-xl p-2.5"
+                      onClick={() => setSelectedIcon(iconItem.path)}
+                      title={iconItem.name}
+                    >
+                      {iconItem.previewSrc ? (
+                        <span className="inline-flex h-full w-full items-center justify-center overflow-hidden rounded-lg">
+                          <img src={iconItem.previewSrc} alt={iconItem.name} className="h-full w-full object-contain" />
+                        </span>
+                      ) : (
+                        <span className="inline-flex h-full w-full items-center justify-center rounded-lg bg-muted text-xs font-semibold text-muted-foreground">
+                          {iconItem.name.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                    </Button>
+                  ))}
+                </div>
+              </Card>
 
-                  <Card className="space-y-3 p-4">
-                    <h3 className="text-base font-semibold">通用开关</h3>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">记住上次功能区设置</span>
-                      <Switch checked={rememberSettings} onCheckedChange={setRememberSettings} />
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      包含：一键透明、深浅色、导航栏自动隐藏、窗口置顶、移出自动隐身、窗口透明度。
-                    </p>
-                  </Card>
-                </TabsContent>
+              <Card className="space-y-3 p-4">
+                <h3 className="text-base font-semibold">通用开关</h3>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">记住上次功能区设置</span>
+                  <Switch checked={rememberSettings} onCheckedChange={setRememberSettings} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  包含：一键透明、深浅色、导航栏自动隐藏、窗口置顶、移出自动隐身、窗口透明度。
+                </p>
+              </Card>
+            </TabsContent>
 
-                <TabsContent value="reading" className="space-y-4">
-                  <Card className="space-y-4 p-4">
-                    <h3 className="text-base font-semibold">阅读增强</h3>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">隐藏页面滚动条</span>
-                      <Switch checked={hideScrollbar} onCheckedChange={setHideScrollbar} />
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm">自定义文字颜色</span>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          type="color"
-                          value={textColor}
-                          className="h-9 w-14 p-1"
-                          onChange={(event) => setTextColor(isHexColor(event.target.value) ? event.target.value : '#000000')}
-                        />
-                        <Button variant="outline" size="sm" onClick={() => setTextColor('#000000')}>
-                          重置
-                        </Button>
-                      </div>
-                    </div>
-                  </Card>
-                </TabsContent>
+            <TabsContent value="enhance" className="space-y-4">
+              <Card className="space-y-4 p-4">
+                <h3 className="text-base font-semibold">阅读增强</h3>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">隐藏页面滚动条</span>
+                  <Switch checked={hideScrollbar} onCheckedChange={setHideScrollbar} />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm">自定义文字颜色</span>
+                  <ColorPickerField value={textColor} onChange={setTextColor} defaultValue="#000000" />
+                </div>
+              </Card>
 
-                <TabsContent value="xhs" className="space-y-4">
-                  <Card className="space-y-4 p-4">
-                    <h3 className="text-base font-semibold">小红书专属设置</h3>
+              <Card className="space-y-4 p-4">
+                <h3 className="text-base font-semibold">小红书专属设置</h3>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">隐藏 Logo (左上角)</span>
-                      <Switch checked={xhsHideLogo} onCheckedChange={setXhsHideLogo} />
-                    </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">隐藏 Logo (左上角)</span>
+                  <Switch checked={xhsHideLogo} onCheckedChange={setXhsHideLogo} />
+                </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">隐藏头部导航 (Header)</span>
-                      <Switch checked={xhsHideHeader} onCheckedChange={setXhsHideHeader} />
-                    </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">隐藏头部导航 (Header)</span>
+                  <Switch checked={xhsHideHeader} onCheckedChange={setXhsHideHeader} />
+                </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">隐藏底部菜单 (Bottom Menu)</span>
-                      <Switch checked={xhsHideBottomMenu} onCheckedChange={setXhsHideBottomMenu} />
-                    </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">隐藏底部菜单 (Bottom Menu)</span>
+                  <Switch checked={xhsHideBottomMenu} onCheckedChange={setXhsHideBottomMenu} />
+                </div>
 
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">详情页隐藏 Feed (#mfContainer.feeds-page)</span>
-                      <Switch checked={xhsHideFeedInDetail} onCheckedChange={setXhsHideFeedInDetail} />
-                    </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">详情页隐藏 Feed (#mfContainer.feeds-page)</span>
+                  <Switch checked={xhsHideFeedInDetail} onCheckedChange={setXhsHideFeedInDetail} />
+                </div>
+              </Card>
+            </TabsContent>
 
-                  </Card>
-                </TabsContent>
+            <TabsContent value="system" className="space-y-4">
+              <Card className="space-y-4 p-4">
+                <h3 className="text-base font-semibold">更新与激活</h3>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={handleCheckUpdates}>
+                    检查更新
+                  </Button>
+                  <span className="text-sm text-muted-foreground">{updateStatusText}</span>
+                </div>
 
-                <TabsContent value="update" className="space-y-4">
-                  <Card className="space-y-4 p-4">
-                    <h3 className="text-base font-semibold">更新与激活</h3>
-                    <div className="flex items-center gap-2">
-                      <Button variant="outline" size="sm" onClick={handleCheckUpdates}>
-                        检查更新
-                      </Button>
-                      <span className="text-sm text-muted-foreground">{updateStatusText}</span>
-                    </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="text"
+                    placeholder="输入激活码（如 MOYU-XXXX-XXXX）"
+                    value={licenseInput}
+                    onChange={(event) => setLicenseInput(event.target.value)}
+                  />
+                  <Button size="sm" onClick={handleActivateLicense}>
+                    激活
+                  </Button>
+                </div>
 
-                    <div className="flex items-center gap-2">
-                      <Input
-                        type="text"
-                        placeholder="输入激活码（如 MOYU-XXXX-XXXX）"
-                        value={licenseInput}
-                        onChange={(event) => setLicenseInput(event.target.value)}
-                      />
-                      <Button size="sm" onClick={handleActivateLicense}>
-                        激活
-                      </Button>
-                    </div>
+                <div className={`text-sm ${licenseStatus.colorClass}`}>{licenseStatus.text}</div>
+              </Card>
 
-                    <div className={`text-sm ${licenseStatus.colorClass}`}>{licenseStatus.text}</div>
-                  </Card>
-                </TabsContent>
-
-                <TabsContent value="shortcut" className="space-y-4">
-                  <Card className="space-y-2 p-4">
-                    <h3 className="text-base font-semibold">快捷键</h3>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>老板键 (显示/隐藏)</span>
-                      <span className="font-medium">Cmd/Ctrl + M</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>一键透明</span>
-                      <span className="font-medium">Cmd/Ctrl + T</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>打开网址管理</span>
-                      <span className="font-medium">Cmd/Ctrl + B</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>后退</span>
-                      <span className="font-medium">Alt + Left</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span>前进</span>
-                      <span className="font-medium">Alt + Right</span>
-                    </div>
-                  </Card>
-                </TabsContent>
-              </Tabs>
-            </section>
-          </div>
+              <Card className="space-y-2 p-4">
+                <h3 className="text-base font-semibold">快捷键</h3>
+                <div className="flex items-center justify-between text-sm">
+                  <span>老板键 (显示/隐藏)</span>
+                  <span className="font-medium">Cmd/Ctrl + M</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span>一键透明</span>
+                  <span className="font-medium">Cmd/Ctrl + T</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span>打开网址管理</span>
+                  <span className="font-medium">Cmd/Ctrl + B</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span>后退</span>
+                  <span className="font-medium">Alt + Left</span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span>前进</span>
+                  <span className="font-medium">Alt + Right</span>
+                </div>
+              </Card>
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
 
@@ -1635,111 +1735,167 @@ export default function App() {
           }
         }}
       >
-        <DialogContent className="max-h-[92vh] max-w-[calc(100vw-20px)] overflow-auto p-4 sm:max-w-[calc(100vw-20px)]">
-          <DialogHeader>
+        <DialogContent className="overflow-auto sm:max-h-[92vh] sm:w-full sm:max-w-[920px]">
+          <DialogHeader className="block h-auto text-left">
             <DialogTitle>网址管理</DialogTitle>
-            <DialogDescription>书签即入口，支持快速检索、编辑和一键跳转。</DialogDescription>
+            <DialogDescription>书签即入口，支持快速检索、行内新增/编辑和一键跳转。</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
-            <Input
-              type="text"
-              value={bookmarkSearch}
-              onChange={(event) => setBookmarkSearch(event.target.value)}
-              placeholder="搜索书签名称或网址..."
-            />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="relative flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="text"
+                  value={bookmarkSearch}
+                  onChange={(event) => setBookmarkSearch(event.target.value)}
+                  placeholder="搜索书签名称或网址..."
+                  className="pl-9"
+                />
+              </div>
 
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto]">
-              <Input
-                type="text"
-                placeholder="名称 (如: B站)"
-                value={bookmarkName}
-                onChange={(event) => setBookmarkName(event.target.value)}
-              />
-              <Input
-                type="text"
-                placeholder="网址 (如: bilibili.com)"
-                value={bookmarkUrl}
-                onChange={(event) => setBookmarkUrl(event.target.value)}
-              />
-              <Button onClick={handleBookmarkSubmit}>{editingIndex >= 0 ? '保存' : '添加'}</Button>
+              <Button
+                variant={isAddingBookmark ? 'secondary' : 'outline'}
+                size="sm"
+                onClick={() => {
+                  if (isAddingBookmark) {
+                    resetBookmarkEditor();
+                    return;
+                  }
+                  startBookmarkAdd();
+                }}
+                className="gap-1.5"
+              >
+                <Plus className="h-4 w-4" />
+                {isAddingBookmark ? '取消新增' : '新增书签'}
+              </Button>
             </div>
 
-            <div className="max-h-[46vh] space-y-2 overflow-auto pr-1">
+            {isAddingBookmark ? (
+              <div className="grid grid-cols-1 gap-2 rounded-lg border border-indigo-500/35 bg-indigo-500/10 p-3 md:grid-cols-[1fr_1fr_auto]">
+                <Input
+                  type="text"
+                  placeholder="名称 (如: B站)"
+                  value={bookmarkName}
+                  onChange={(event) => setBookmarkName(event.target.value)}
+                  onKeyDown={handleBookmarkEditorKeyDown}
+                  autoFocus
+                />
+                <Input
+                  type="text"
+                  placeholder="网址 (如: bilibili.com)"
+                  value={bookmarkUrl}
+                  onChange={(event) => setBookmarkUrl(event.target.value)}
+                  onKeyDown={handleBookmarkEditorKeyDown}
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={resetBookmarkEditor}>
+                    取消
+                  </Button>
+                  <Button size="sm" onClick={handleBookmarkSubmit}>
+                    添加
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="max-h-[52vh] space-y-2 overflow-auto pr-1">
               {filteredBookmarks.length === 0 ? (
                 <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
                   {bookmarkSearch.trim() ? `没有匹配 “${bookmarkSearch.trim()}” 的书签` : '还没有书签，先添加一个常用网址吧。'}
                 </div>
               ) : null}
 
-              {filteredBookmarks.map((bookmarkItem) => (
-                <Card key={`${bookmarkItem.sourceIndex}-${bookmarkItem.url}`} className="p-3">
-                  <div className="flex items-center justify-between gap-3">
+              {filteredBookmarks.map((bookmarkItem) => {
+                const isCurrentEditing = editingIndex === bookmarkItem.sourceIndex;
+
+                if (isCurrentEditing) {
+                  return (
+                    <div
+                      key={`${bookmarkItem.sourceIndex}-${bookmarkItem.url}`}
+                      className="grid grid-cols-1 gap-2 rounded-lg border border-amber-500/45 bg-amber-500/10 p-3 md:grid-cols-[1fr_1fr_auto]"
+                    >
+                      <Input
+                        type="text"
+                        placeholder="名称 (如: B站)"
+                        value={bookmarkName}
+                        onChange={(event) => setBookmarkName(event.target.value)}
+                        onKeyDown={handleBookmarkEditorKeyDown}
+                        autoFocus
+                      />
+                      <Input
+                        type="text"
+                        placeholder="网址 (如: bilibili.com)"
+                        value={bookmarkUrl}
+                        onChange={(event) => setBookmarkUrl(event.target.value)}
+                        onKeyDown={handleBookmarkEditorKeyDown}
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <Button variant="outline" size="sm" onClick={resetBookmarkEditor}>
+                          取消
+                        </Button>
+                        <Button size="sm" onClick={handleBookmarkSubmit}>
+                          保存
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div
+                    key={`${bookmarkItem.sourceIndex}-${bookmarkItem.url}`}
+                    className="group flex h-[52px] items-center gap-2 rounded-lg border border-border/80 bg-card px-2 pr-2.5 transition-colors hover:bg-muted/35"
+                  >
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-auto flex-1 justify-start p-0 text-left"
+                      className="h-full min-w-0 flex-1 justify-start gap-3 rounded-md px-0.5 py-0 text-left hover:bg-transparent"
                       onClick={() => {
                         navigateTo(bookmarkItem.url);
                         setBookmarksOpen(false);
                       }}
                     >
-                      <div className="text-sm font-medium">{bookmarkItem.name}</div>
-                      <div className="text-xs text-muted-foreground">{bookmarkItem.url}</div>
+                      <BookmarkFavicon name={bookmarkItem.name} url={bookmarkItem.url} />
+                      <div className="min-w-0 leading-tight">
+                        <div className="truncate text-sm font-medium">{bookmarkItem.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">{bookmarkItem.url}</div>
+                      </div>
                     </Button>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
                       <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          const target = bookmarks[bookmarkItem.sourceIndex];
-                          if (!target) return;
-                          setEditingIndex(bookmarkItem.sourceIndex);
-                          setBookmarkName(target.name);
-                          setBookmarkUrl(target.url);
-                        }}
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => startBookmarkEdit(bookmarkItem.sourceIndex)}
                       >
-                        编辑
+                        <HeaderSvgIcon
+                          svg={BOOKMARK_ACTION_ICON_SVGS.edit}
+                          className="inline-block h-4 w-4 shrink-0 align-middle [&>svg]:block [&>svg]:h-full [&>svg]:w-full"
+                        />
+                        <span className="sr-only">编辑</span>
                       </Button>
                       <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => {
-                          setDeleteBookmarkIndex(bookmarkItem.sourceIndex);
-                        }}
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-destructive hover:text-destructive"
+                        onClick={() => handleBookmarkDelete(bookmarkItem.sourceIndex)}
                       >
-                        删除
+                        <HeaderSvgIcon
+                          svg={BOOKMARK_ACTION_ICON_SVGS.delete}
+                          className="inline-block h-4 w-4 shrink-0 align-middle [&>svg]:block [&>svg]:h-full [&>svg]:w-full"
+                        />
+                        <span className="sr-only">删除</span>
                       </Button>
                     </div>
                   </div>
-                </Card>
-              ))}
+                );
+              })}
             </div>
           </div>
         </DialogContent>
       </Dialog>
-
-      <AlertDialog open={deleteBookmarkIndex !== null} onOpenChange={(open) => (!open ? setDeleteBookmarkIndex(null) : null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确定删除该书签？</AlertDialogTitle>
-            <AlertDialogDescription>删除后无法恢复。你可以重新添加相同网址。</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => {
-                if (deleteBookmarkIndex === null) return;
-                handleBookmarkDelete(deleteBookmarkIndex);
-              }}
-            >
-              删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <Dialog
         open={onboardingOpen}
@@ -1757,7 +1913,7 @@ export default function App() {
           setOnboardingOpen(false);
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>欢迎使用 Moyu Reader</DialogTitle>
             <DialogDescription>
