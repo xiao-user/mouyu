@@ -50,7 +50,7 @@ The workflow can still publish unsigned packages (not recommended for public dis
 
 1. Bump `package.json` version.
 2. Commit and push.
-3. Create and push a tag (example: `v1.0.1`).
+3. Create and push a tag that matches `package.json` version (example: version `1.0.1` -> tag `v1.0.1`).
 4. GitHub Actions `Release` workflow builds and publishes artifacts to GitHub Releases.
 5. Packaged apps will detect the new version and update automatically.
 
