@@ -1,0 +1,102 @@
+{
+  "name": "moyu-reader",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "node scripts/start-electron.js",
+    "start:raw": "electron .",
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir --publish never",
+    "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish never",
+    "dist:mac": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never",
+    "dist:win": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish never",
+    "release:github": "npm run build && electron-builder --publish always -c.publish.provider=github",
+    "preview": "vite preview",
+    "test:regression": "vitest run",
+    "test:regression:watch": "vitest",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check ipc-channels.js && node --check scripts/start-electron.js && node --check vite.config.js",
+    "doctor": "node scripts/doctor-electron.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Moyu Reader desktop app with webview reading and auto-update support.",
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "@vitejs/plugin-react": "^6.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^39.2.4",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1",
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-slider": "^1.3.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "electron-updater": "^6.8.3",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0",
+    "tw-animate-css": "^1.4.0"
+  },
+  "build": {
+    "appId": "com.moyu.reader",
+    "productName": "Moyu Reader",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "ipc-channels.js",
+      "lib/**/*",
+      "AppLogo/**/*",
+      "index.legacy.html",
+      "renderer.js",
+      "styles/**/*",
+      "package.json"
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
+  }
+}

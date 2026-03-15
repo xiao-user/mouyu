@@ -1,0 +1,1071 @@
+const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage, shell, session } = require('electron');
+const fs = require('fs');
+const path = require('path');
+const { autoUpdater } = require('electron-updater');
+const { compareVersions } = require('./lib/update-utils');
+const { IPC_CHANNELS } = require('./ipc-channels');
+
+let mainWindow;
+const SUPPORTED_ICON_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.icns']);
+const LICENSE_FILE_NAME = 'license-state.json';
+const LICENSE_KEY_PATTERN = /^MOYU-[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+$/;
+const ALLOWED_DEV_HOSTS = new Set(['127.0.0.1', 'localhost']);
+const ALLOWED_WEBVIEW_PROTOCOLS = new Set(['http:', 'https:']);
+const ALLOWED_WEBVIEW_SPECIAL_URLS = new Set(['about:blank']);
+const ALLOWED_WEBVIEW_PERMISSIONS = new Set(['fullscreen']);
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:']);
+const WEBVIEW_HOST_ALLOWLIST = new Set(
+  String(process.env.MOYU_WEBVIEW_HOST_ALLOWLIST || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+);
+const UPDATE_MANIFEST_URL = String(process.env.MOYU_UPDATE_MANIFEST_URL || '').trim();
+const UPDATE_GITHUB_REPO = String(process.env.MOYU_UPDATE_GITHUB_REPO || '').trim();
+const UPDATE_HTTP_TIMEOUT_MS = Number.parseInt(process.env.MOYU_UPDATE_HTTP_TIMEOUT_MS || '7000', 10);
+const UPDATE_FEED_URL = String(process.env.MOYU_UPDATE_FEED_URL || '').trim();
+const AUTO_UPDATE_CHECK_INTERVAL_MS = Number.parseInt(
+  process.env.MOYU_AUTO_UPDATE_CHECK_INTERVAL_MS || String(4 * 60 * 60 * 1000),
+  10
+);
+const AUTO_UPDATE_STARTUP_DELAY_MS = Number.parseInt(
+  process.env.MOYU_AUTO_UPDATE_STARTUP_DELAY_MS || '15000',
+  10
+);
+const ENABLE_DEV_AUTO_UPDATE = String(process.env.MOYU_DEV_AUTO_UPDATE || '') === 'true';
+
+let autoUpdateCheckTimer = null;
+let isAutoUpdaterInitialized = false;
+let isAutoUpdateChecking = false;
+let updateState = {
+  ok: true,
+  status: 'idle',
+  message: '未检查',
+  checkedAt: '',
+  currentVersion: app.getVersion(),
+  latestVersion: '',
+  releaseUrl: '',
+  source: '',
+  publishedAt: '',
+  notes: '',
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  canInstall: false,
+  supportsAutoUpdate: false,
+};
+
+function normalizeHost(host) {
+  return String(host || '').trim().toLowerCase();
+}
+
+function isHostAllowed(host) {
+  const safeHost = normalizeHost(host);
+  if (!safeHost) return false;
+  if (WEBVIEW_HOST_ALLOWLIST.size === 0) return true;
+  return WEBVIEW_HOST_ALLOWLIST.has(safeHost);
+}
+
+function parseUrlSafely(rawUrl) {
+  if (typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  try {
+    return new URL(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedWebviewUrl(rawUrl) {
+  const safeUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!safeUrl) return false;
+  if (ALLOWED_WEBVIEW_SPECIAL_URLS.has(safeUrl)) return true;
+
+  const parsed = parseUrlSafely(safeUrl);
+  if (!parsed) return false;
+  if (!ALLOWED_WEBVIEW_PROTOCOLS.has(parsed.protocol)) return false;
+  return isHostAllowed(parsed.hostname);
+}
+
+function getPermissionOrigin(details = {}, webContents) {
+  if (typeof details.requestingUrl === 'string' && details.requestingUrl.trim()) {
+    return details.requestingUrl;
+  }
+  if (typeof details.embeddingOrigin === 'string' && details.embeddingOrigin.trim()) {
+    return details.embeddingOrigin;
+  }
+  try {
+    return webContents?.getURL?.() || '';
+  } catch {
+    return '';
+  }
+}
+
+function shouldAllowWebviewPermission(webContents, permission, details = {}) {
+  if (!webContents || webContents.isDestroyed()) return false;
+  if (webContents.getType() !== 'webview') return true;
+  if (!ALLOWED_WEBVIEW_PERMISSIONS.has(permission)) return false;
+
+  const origin = getPermissionOrigin(details, webContents);
+  return isAllowedWebviewUrl(origin);
+}
+
+function hardenWebviewAttachment(event, webPreferences, params = {}) {
+  // 禁止 webview 注入自定义 preload，统一强制隔离与沙箱策略。
+  delete webPreferences.preload;
+  delete webPreferences.preloadURL;
+  webPreferences.nodeIntegration = false;
+  webPreferences.nodeIntegrationInSubFrames = false;
+  webPreferences.nodeIntegrationInWorker = false;
+  webPreferences.contextIsolation = true;
+  webPreferences.sandbox = true;
+  webPreferences.webSecurity = true;
+  webPreferences.allowRunningInsecureContent = false;
+  webPreferences.enableBlinkFeatures = '';
+  webPreferences.experimentalFeatures = false;
+  webPreferences.plugins = false;
+
+  params.allowpopups = false;
+  if (typeof params.preload === 'string') {
+    delete params.preload;
+  }
+
+  const targetUrl = typeof params.src === 'string' ? params.src : '';
+  if (!isAllowedWebviewUrl(targetUrl)) {
+    event.preventDefault();
+    console.warn('[security:webview] blocked attachment url:', targetUrl);
+  }
+}
+
+function attachWebviewGuards(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (!isAllowedWebviewUrl(url)) {
+      console.warn('[security:webview] blocked new-window url:', url);
+      return { action: 'deny' };
+    }
+
+    // 禁止新窗口，统一交给系统浏览器打开，减少 webview 攻击面。
+    shell.openExternal(url).catch((error) => {
+      console.error('[security:webview] openExternal failed:', error);
+    });
+    return { action: 'deny' };
+  });
+
+  const guardNavigation = (event, url) => {
+    if (isAllowedWebviewUrl(url)) return;
+    event.preventDefault();
+    console.warn('[security:webview] blocked navigation url:', url);
+  };
+
+  contents.on('will-navigate', guardNavigation);
+  contents.on('will-redirect', guardNavigation);
+}
+
+function installPermissionHandlers() {
+  const activeSession = session.defaultSession;
+  if (!activeSession) return;
+
+  activeSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const allowed = shouldAllowWebviewPermission(webContents, permission, details);
+    if (!allowed) {
+      const origin = getPermissionOrigin(details, webContents);
+      console.warn('[security:webview] blocked permission request:', permission, origin);
+    }
+    callback(allowed);
+  });
+
+  activeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    const requestDetails = {
+      ...(details || {}),
+      requestingUrl: requestingOrigin || details?.requestingUrl || '',
+    };
+    return shouldAllowWebviewPermission(webContents, permission, requestDetails);
+  });
+}
+
+function isAllowedExternalUrl(rawUrl) {
+  const parsed = parseUrlSafely(rawUrl);
+  if (!parsed) return false;
+  return ALLOWED_EXTERNAL_PROTOCOLS.has(parsed.protocol);
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = UPDATE_HTTP_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs || 0));
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': `moyu-reader/${app.getVersion()}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timerId);
+  }
+}
+
+function normalizeReleaseUrl(urlValue) {
+  if (typeof urlValue !== 'string') return '';
+  const safeUrl = urlValue.trim();
+  if (!safeUrl) return '';
+  return isAllowedExternalUrl(safeUrl) ? safeUrl : '';
+}
+
+function parseReleaseFromManifest(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const latestVersion = typeof payload.version === 'string' ? payload.version.trim() : '';
+  if (!latestVersion) return null;
+
+  return {
+    version: latestVersion,
+    url: normalizeReleaseUrl(payload.url || payload.downloadUrl || ''),
+    notes: typeof payload.notes === 'string' ? payload.notes : '',
+    publishedAt: typeof payload.publishedAt === 'string' ? payload.publishedAt : '',
+    source: 'manifest',
+  };
+}
+
+function parseReleaseFromGithub(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const latestVersion = typeof payload.tag_name === 'string' ? payload.tag_name.trim() : '';
+  if (!latestVersion) return null;
+
+  const htmlUrl = normalizeReleaseUrl(payload.html_url || '');
+
+  return {
+    version: latestVersion,
+    url: htmlUrl,
+    notes: typeof payload.body === 'string' ? payload.body : '',
+    publishedAt: typeof payload.published_at === 'string' ? payload.published_at : '',
+    source: 'github',
+  };
+}
+
+async function resolveLatestReleaseInfo() {
+  if (UPDATE_MANIFEST_URL) {
+    const payload = await fetchJsonWithTimeout(UPDATE_MANIFEST_URL);
+    const parsed = parseReleaseFromManifest(payload);
+    if (!parsed) {
+      throw new Error('更新清单缺少 version 字段');
+    }
+    return parsed;
+  }
+
+  if (UPDATE_GITHUB_REPO) {
+    const apiUrl = `https://api.github.com/repos/${UPDATE_GITHUB_REPO}/releases/latest`;
+    const payload = await fetchJsonWithTimeout(apiUrl);
+    const parsed = parseReleaseFromGithub(payload);
+    if (!parsed) {
+      throw new Error('GitHub Release 数据缺少 tag_name');
+    }
+    return parsed;
+  }
+
+  return null;
+}
+
+function getUpdateStateSnapshot() {
+  return { ...updateState };
+}
+
+function broadcastUpdateState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send(IPC_CHANNELS.updateStateChanged, getUpdateStateSnapshot());
+}
+
+function patchUpdateState(patch = {}) {
+  updateState = {
+    ...updateState,
+    ...patch,
+  };
+  broadcastUpdateState();
+  return getUpdateStateSnapshot();
+}
+
+function supportsAutoUpdate() {
+  return app.isPackaged || ENABLE_DEV_AUTO_UPDATE;
+}
+
+function getGithubReleasePageUrl() {
+  if (!UPDATE_GITHUB_REPO) return '';
+  return `https://github.com/${UPDATE_GITHUB_REPO}/releases`;
+}
+
+function normalizeAutoUpdateError(error) {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error || '未知错误');
+}
+
+async function checkForUpdatesFallback() {
+  const checkedAt = new Date().toISOString();
+  const currentVersion = app.getVersion();
+
+  if (!UPDATE_MANIFEST_URL && !UPDATE_GITHUB_REPO) {
+    return patchUpdateState({
+      ok: false,
+      status: 'not-configured',
+      supportsAutoUpdate: false,
+      checkedAt,
+      currentVersion,
+      latestVersion: '',
+      releaseUrl: '',
+      source: '',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      message: '未配置更新源（MOYU_UPDATE_MANIFEST_URL 或 MOYU_UPDATE_GITHUB_REPO）。',
+    });
+  }
+
+  try {
+    const latest = await resolveLatestReleaseInfo();
+    if (!latest) {
+      return patchUpdateState({
+        ok: false,
+        status: 'not-configured',
+        supportsAutoUpdate: false,
+        checkedAt,
+        currentVersion,
+        latestVersion: '',
+        releaseUrl: '',
+        source: '',
+        percent: 0,
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+        canInstall: false,
+        message: '未找到可用更新源。',
+      });
+    }
+
+    const compared = compareVersions(currentVersion, latest.version);
+    const isUpdateAvailable = compared < 0;
+
+    return patchUpdateState({
+      ok: true,
+      status: isUpdateAvailable ? 'update-available' : 'up-to-date',
+      supportsAutoUpdate: false,
+      checkedAt,
+      currentVersion,
+      latestVersion: latest.version,
+      releaseUrl: latest.url || getGithubReleasePageUrl(),
+      source: latest.source,
+      publishedAt: latest.publishedAt,
+      notes: latest.notes,
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      message: isUpdateAvailable
+        ? `发现新版本 ${latest.version}`
+        : `当前已是最新版（${currentVersion}）`,
+    });
+  } catch (error) {
+    return patchUpdateState({
+      ok: false,
+      status: 'error',
+      supportsAutoUpdate: false,
+      checkedAt,
+      currentVersion,
+      latestVersion: '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: '',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      message: `更新检查失败：${normalizeAutoUpdateError(error)}`,
+    });
+  }
+}
+
+function initAutoUpdater() {
+  if (isAutoUpdaterInitialized) return;
+  isAutoUpdaterInitialized = true;
+
+  if (!app.isPackaged && ENABLE_DEV_AUTO_UPDATE) {
+    autoUpdater.forceDevUpdateConfig = true;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = false;
+
+  if (UPDATE_FEED_URL) {
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: UPDATE_FEED_URL,
+    });
+  }
+
+  autoUpdater.on('checking-for-update', () => {
+    patchUpdateState({
+      ok: true,
+      status: 'checking',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: '检查更新中...',
+    });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    patchUpdateState({
+      ok: true,
+      status: 'downloading',
+      checkedAt: new Date().toISOString(),
+      latestVersion: info?.version || '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `发现新版本 ${info?.version || ''}，正在后台下载...`,
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const percent = Number.isFinite(progress?.percent) ? progress.percent : 0;
+    patchUpdateState({
+      ok: true,
+      status: 'downloading',
+      percent: Math.max(0, Math.min(100, percent)),
+      transferred: Number.isFinite(progress?.transferred) ? progress.transferred : 0,
+      total: Number.isFinite(progress?.total) ? progress.total : 0,
+      bytesPerSecond: Number.isFinite(progress?.bytesPerSecond) ? progress.bytesPerSecond : 0,
+      supportsAutoUpdate: true,
+      message: `正在下载更新 ${Math.max(0, Math.min(100, percent)).toFixed(1)}%`,
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    patchUpdateState({
+      ok: true,
+      status: 'update-downloaded',
+      checkedAt: new Date().toISOString(),
+      latestVersion: info?.version || updateState.latestVersion || '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 100,
+      canInstall: true,
+      supportsAutoUpdate: true,
+      message: `更新已下载完成（${info?.version || updateState.latestVersion || ''}），可重启安装。`,
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    patchUpdateState({
+      ok: true,
+      status: 'up-to-date',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `当前已是最新版（${app.getVersion()}）`,
+    });
+  });
+
+  autoUpdater.on('error', (error) => {
+    patchUpdateState({
+      ok: false,
+      status: 'error',
+      checkedAt: new Date().toISOString(),
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `自动更新失败：${normalizeAutoUpdateError(error)}`,
+    });
+  });
+}
+
+async function checkForUpdates() {
+  if (!supportsAutoUpdate()) {
+    const fallback = await checkForUpdatesFallback();
+    return patchUpdateState({
+      ...fallback,
+      supportsAutoUpdate: false,
+      message: `${fallback.message}（当前为开发模式，自动下载安装仅在打包后可用）`,
+    });
+  }
+
+  initAutoUpdater();
+  if (isAutoUpdateChecking) {
+    return getUpdateStateSnapshot();
+  }
+
+  isAutoUpdateChecking = true;
+  try {
+    await autoUpdater.checkForUpdates();
+    return getUpdateStateSnapshot();
+  } catch (error) {
+    return patchUpdateState({
+      ok: false,
+      status: 'error',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `更新检查失败：${normalizeAutoUpdateError(error)}`,
+    });
+  } finally {
+    isAutoUpdateChecking = false;
+  }
+}
+
+async function installUpdateNow() {
+  if (!supportsAutoUpdate()) {
+    return {
+      ok: false,
+      message: '当前为开发模式，自动安装仅在打包版本可用。',
+      state: getUpdateStateSnapshot(),
+    };
+  }
+
+  if (!updateState.canInstall || updateState.status !== 'update-downloaded') {
+    return {
+      ok: false,
+      message: '尚未下载可安装的更新包。',
+      state: getUpdateStateSnapshot(),
+    };
+  }
+
+  patchUpdateState({
+    message: '正在重启并安装更新...',
+  });
+
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+    } catch (error) {
+      patchUpdateState({
+        ok: false,
+        status: 'error',
+        canInstall: true,
+        message: `执行安装失败：${normalizeAutoUpdateError(error)}`,
+      });
+    }
+  });
+
+  return {
+    ok: true,
+    message: '正在重启并安装更新...',
+    state: getUpdateStateSnapshot(),
+  };
+}
+
+function scheduleAutoUpdateChecks() {
+  if (!supportsAutoUpdate()) return;
+  const safeDelay = Number.isFinite(AUTO_UPDATE_STARTUP_DELAY_MS) && AUTO_UPDATE_STARTUP_DELAY_MS > 0
+    ? AUTO_UPDATE_STARTUP_DELAY_MS
+    : 15000;
+  const safeInterval = Number.isFinite(AUTO_UPDATE_CHECK_INTERVAL_MS) && AUTO_UPDATE_CHECK_INTERVAL_MS > 0
+    ? AUTO_UPDATE_CHECK_INTERVAL_MS
+    : 4 * 60 * 60 * 1000;
+
+  setTimeout(() => {
+    checkForUpdates().catch((error) => {
+      console.error('[auto-update:start-check]', error);
+    });
+  }, safeDelay);
+
+  if (autoUpdateCheckTimer) {
+    clearInterval(autoUpdateCheckTimer);
+  }
+  autoUpdateCheckTimer = setInterval(() => {
+    checkForUpdates().catch((error) => {
+      console.error('[auto-update:interval-check]', error);
+    });
+  }, safeInterval);
+}
+
+function getAppLogoDir() {
+  return path.resolve(path.join(app.getAppPath(), 'AppLogo'));
+}
+
+function isPathInsideDirectory(targetPath, directoryPath) {
+  const relative = path.relative(directoryPath, targetPath);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function isSafeIconPath(iconPath) {
+  if (typeof iconPath !== 'string' || iconPath.trim() === '') return false;
+
+  const resolvedIconPath = path.resolve(iconPath);
+  const appLogoDir = getAppLogoDir();
+  const ext = path.extname(resolvedIconPath).toLowerCase();
+
+  return (
+    isPathInsideDirectory(resolvedIconPath, appLogoDir) &&
+    SUPPORTED_ICON_EXTENSIONS.has(ext) &&
+    fs.existsSync(resolvedIconPath)
+  );
+}
+
+async function listCamouflageIcons() {
+  const appLogoDir = getAppLogoDir();
+  const entries = await fs.promises.readdir(appLogoDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(appLogoDir, entry.name))
+    .filter((filePath) => SUPPORTED_ICON_EXTENSIONS.has(path.extname(filePath).toLowerCase()))
+    .sort();
+}
+
+function getImageMimeTypeByExtension(iconPath) {
+  const ext = path.extname(iconPath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.png') return 'image/png';
+  return '';
+}
+
+function getCamouflageIconPreviewDataUrl(iconPath) {
+  if (!isSafeIconPath(iconPath)) return '';
+
+  try {
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) {
+      return image.resize({ width: 64, height: 64 }).toDataURL();
+    }
+  } catch (error) {
+    console.error('Failed to generate native image preview:', error);
+  }
+
+  try {
+    const mimeType = getImageMimeTypeByExtension(iconPath);
+    if (!mimeType) return '';
+    const data = fs.readFileSync(iconPath);
+    return `data:${mimeType};base64,${data.toString('base64')}`;
+  } catch (error) {
+    console.error('Failed to generate fallback image preview:', error);
+  }
+
+  return '';
+}
+
+function getLicenseFilePath() {
+  return path.join(app.getPath('userData'), LICENSE_FILE_NAME);
+}
+
+function validateLicenseKey(licenseKey) {
+  if (typeof licenseKey !== 'string') return false;
+  return LICENSE_KEY_PATTERN.test(licenseKey.trim().toUpperCase());
+}
+
+function maskLicenseKey(licenseKey) {
+  if (typeof licenseKey !== 'string' || licenseKey.length < 8) return '';
+  return `${licenseKey.slice(0, 5)}****${licenseKey.slice(-4)}`;
+}
+
+function getSafeRendererDevUrl() {
+  const rawUrl = process.env.ELECTRON_RENDERER_URL;
+  if (typeof rawUrl !== 'string' || rawUrl.trim() === '') return null;
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const isHttpProtocol = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    if (!isHttpProtocol || !ALLOWED_DEV_HOSTS.has(parsed.hostname)) {
+      return null;
+    }
+
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function loadRendererEntry(window) {
+  const devUrl = getSafeRendererDevUrl();
+  if (devUrl) {
+    await window.loadURL(devUrl);
+    return;
+  }
+
+  const distIndexPath = path.join(app.getAppPath(), 'dist', 'index.html');
+  if (fs.existsSync(distIndexPath)) {
+    await window.loadFile(distIndexPath);
+    return;
+  }
+
+  const legacyIndexPath = path.join(app.getAppPath(), 'index.legacy.html');
+  if (fs.existsSync(legacyIndexPath)) {
+    await window.loadFile(legacyIndexPath);
+    return;
+  }
+
+  const fallbackHtml = `
+    <html lang="zh-CN">
+      <head><meta charset="utf-8" /></head>
+      <body style="font-family: sans-serif; padding: 24px;">
+        <h3>Moyu Reader 启动失败</h3>
+        <p>未找到可用渲染入口。请执行 <code>npm run start</code> 或先执行 <code>npm run build</code>。</p>
+      </body>
+    </html>
+  `;
+  await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(fallbackHtml)}`);
+}
+
+function readLicenseState() {
+  try {
+    const filePath = getLicenseFilePath();
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+
+    if (parsed?.encrypted && typeof parsed.payload === 'string') {
+      if (!safeStorage.isEncryptionAvailable()) return null;
+      const decrypted = safeStorage.decryptString(Buffer.from(parsed.payload, 'base64'));
+      return JSON.parse(decrypted);
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch (error) {
+    console.error('Failed to read license state:', error);
+  }
+  return null;
+}
+
+function writeLicenseState(state) {
+  const filePath = getLicenseFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  if (safeStorage.isEncryptionAvailable()) {
+    const encrypted = safeStorage.encryptString(JSON.stringify(state)).toString('base64');
+    fs.writeFileSync(filePath, JSON.stringify({ encrypted: true, payload: encrypted }, null, 2), 'utf-8');
+    return;
+  }
+
+  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 400, // 初始宽度，像手机一样窄一点适合摸鱼
+    height: 600,
+    frame: false, // 无边框模式，更隐蔽
+    // titleBarStyle: 'hidden', // 不再使用原生红绿灯
+    // trafficLightPosition: { x: 10, y: 8 }, // 微调红绿灯位置
+    transparent: true, // 开启透明支持
+    alwaysOnTop: false, // 默认不置顶
+    hasShadow: false, // 去除阴影
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      webviewTag: true, // 允许使用 webview 标签浏览网页
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
+    }
+  });
+
+  mainWindow.webContents.on('will-attach-webview', hardenWebviewAttachment);
+
+  loadRendererEntry(mainWindow).catch((error) => {
+    console.error('Failed to load renderer entry:', error);
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    broadcastUpdateState();
+  });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
+  // 注册老板键 (CommandOrControl+M) -> 最小化/恢复 (全局快捷键，即使应用未聚焦也能触发)
+  globalShortcut.register('CommandOrControl+M', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) {
+      mainWindow.hide();
+    } else {
+      mainWindow.show();
+    }
+  });
+
+  // 注册紧急退出键 (CommandOrControl+Q) -> 全局退出
+  globalShortcut.register('CommandOrControl+Q', () => {
+    app.quit();
+  });
+}
+
+// 创建应用菜单
+function createMenu() {
+  const template = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: '摸鱼操作',
+      submenu: [
+        {
+          label: '一键透明',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => {
+            if (mainWindow) mainWindow.webContents.send(IPC_CHANNELS.toggleTransparency);
+          }
+        },
+        {
+          label: '打开书签',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => {
+            if (mainWindow) mainWindow.webContents.send(IPC_CHANNELS.toggleBookmarks);
+          }
+        },
+        { type: 'separator' },
+        {
+          label: '后退',
+          accelerator: 'Alt+Left',
+          click: () => {
+            if (mainWindow) mainWindow.webContents.send(IPC_CHANNELS.goBack);
+          }
+        },
+        {
+          label: '前进',
+          accelerator: 'Alt+Right',
+          click: () => {
+            if (mainWindow) mainWindow.webContents.send(IPC_CHANNELS.goForward);
+          }
+        }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' }
+      ]
+    }
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
+// 监听从渲染进程发来的透明度/置顶设置
+ipcMain.on(IPC_CHANNELS.setAlwaysOnTop, (event, flag) => {
+  if (mainWindow) mainWindow.setAlwaysOnTop(flag);
+});
+
+// 窗口控制
+ipcMain.on(IPC_CHANNELS.windowMinimize, () => {
+  if (mainWindow) mainWindow.minimize();
+});
+ipcMain.on(IPC_CHANNELS.windowClose, () => {
+  app.quit(); // 直接退出整个应用
+});
+
+// 渲染进程请求图标列表
+ipcMain.handle(IPC_CHANNELS.listCamouflageIcons, async () => {
+  try {
+    return await listCamouflageIcons();
+  } catch (error) {
+    console.error('Failed to list camouflage icons:', error);
+    return [];
+  }
+});
+
+ipcMain.handle(IPC_CHANNELS.getCamouflageIconPreview, async (event, iconPath) => {
+  try {
+    return getCamouflageIconPreviewDataUrl(iconPath);
+  } catch (error) {
+    console.error('Failed to get camouflage icon preview:', error);
+    return '';
+  }
+});
+
+ipcMain.handle(IPC_CHANNELS.checkForUpdates, async () => {
+  return checkForUpdates();
+});
+
+ipcMain.handle(IPC_CHANNELS.getUpdateState, async () => {
+  return getUpdateStateSnapshot();
+});
+
+ipcMain.handle(IPC_CHANNELS.installUpdateNow, async () => {
+  return installUpdateNow();
+});
+
+ipcMain.handle(IPC_CHANNELS.openExternalUrl, async (event, rawUrl) => {
+  const safeUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!isAllowedExternalUrl(safeUrl)) {
+    return { ok: false, message: '仅支持打开 http/https 链接。' };
+  }
+
+  try {
+    await shell.openExternal(safeUrl);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `打开链接失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+});
+
+ipcMain.handle(IPC_CHANNELS.activateLicense, async (event, licenseKey) => {
+  const normalizedKey = typeof licenseKey === 'string' ? licenseKey.trim().toUpperCase() : '';
+  if (!validateLicenseKey(normalizedKey)) {
+    return {
+      ok: false,
+      message: '激活码格式无效，请输入类似 MOYU-XXXX-XXXX 的激活码。',
+    };
+  }
+
+  const state = {
+    licenseKey: normalizedKey,
+    activatedAt: new Date().toISOString(),
+  };
+  writeLicenseState(state);
+
+  return {
+    ok: true,
+    message: '激活成功。',
+    status: {
+      activated: true,
+      maskedKey: maskLicenseKey(normalizedKey),
+      activatedAt: state.activatedAt,
+    },
+  };
+});
+
+ipcMain.handle(IPC_CHANNELS.getLicenseStatus, async () => {
+  const state = readLicenseState();
+  if (!state?.licenseKey) {
+    return { activated: false, maskedKey: '', activatedAt: '' };
+  }
+  return {
+    activated: true,
+    maskedKey: maskLicenseKey(state.licenseKey),
+    activatedAt: state.activatedAt || '',
+  };
+});
+
+// 更改应用图标 (伪装模式)
+ipcMain.on(IPC_CHANNELS.changeIcon, (event, iconPath) => {
+  if (!isSafeIconPath(iconPath)) {
+    console.warn('Ignored unsafe icon path:', iconPath);
+    return;
+  }
+
+  if (process.platform === 'darwin') {
+    app.dock.setIcon(iconPath);
+  }
+  // Windows 下通常需要重新打包或使用 overlay，这里主要支持 macOS Dock 图标实时更改
+  // 如果是 Windows，可以尝试 mainWindow.setIcon(iconPath)
+  if (mainWindow) {
+    mainWindow.setIcon(iconPath);
+  }
+});
+
+app.whenReady().then(() => {
+  installPermissionHandlers();
+  patchUpdateState({
+    currentVersion: app.getVersion(),
+    releaseUrl: getGithubReleasePageUrl(),
+    supportsAutoUpdate: supportsAutoUpdate(),
+    message: supportsAutoUpdate()
+      ? '等待自动检查更新...'
+      : '当前为开发模式，自动下载安装仅在打包后可用。',
+  });
+
+  if (supportsAutoUpdate()) {
+    initAutoUpdater();
+    scheduleAutoUpdateChecks();
+  }
+
+  app.on('web-contents-created', (_event, contents) => {
+    if (contents.getType() === 'webview') {
+      contents.setMaxListeners(30);
+      attachWebviewGuards(contents);
+    }
+  });
+
+  createWindow();
+  createMenu(); // 创建菜单
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('will-quit', () => {
+  if (autoUpdateCheckTimer) {
+    clearInterval(autoUpdateCheckTimer);
+    autoUpdateCheckTimer = null;
+  }
+  globalShortcut.unregisterAll();
+});
