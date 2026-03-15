@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listCamouflageIcons: () => ipcRenderer.invoke(IPC_CHANNELS.listCamouflageIcons),
   getCamouflageIconPreview: (iconPath) => ipcRenderer.invoke(IPC_CHANNELS.getCamouflageIconPreview, iconPath),
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.checkForUpdates),
+  openExternalUrl: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternalUrl, url),
   activateLicense: (licenseKey) => ipcRenderer.invoke(IPC_CHANNELS.activateLicense, licenseKey),
   getLicenseStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getLicenseStatus),
   onToggleTransparency: (callback) => {

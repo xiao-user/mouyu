@@ -10,6 +10,7 @@ const IPC_CHANNELS = {
   goBack: 'go-back',
   goForward: 'go-forward',
   checkForUpdates: 'check-for-updates',
+  openExternalUrl: 'open-external-url',
   activateLicense: 'activate-license',
   getLicenseStatus: 'get-license-status',
 };

@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { getFileNameFromPath, isHexColor, normalizeUrl } from '@/lib/app-format-utils';
 import iconBookmarkRaw from '@/assets/icons/header/IconBookmark.svg?raw';
 import iconChevronLeftRaw from '@/assets/icons/header/IconChevronLeftMedium.svg?raw';
 import iconChevronRightRaw from '@/assets/icons/header/IconChevronRightMedium.svg?raw';
@@ -171,6 +172,7 @@ const electronBridge = window.electronAPI ?? {
   listCamouflageIcons: async () => [],
   getCamouflageIconPreview: async () => '',
   checkForUpdates: async () => ({ ok: false, message: '更新功能不可用。' }),
+  openExternalUrl: async () => ({ ok: false, message: '打开外链功能不可用。' }),
   activateLicense: async () => ({ ok: false, message: '激活功能不可用。' }),
   getLicenseStatus: async () => ({ activated: false, maskedKey: '', activatedAt: '' }),
   onToggleTransparency: noop,
@@ -178,13 +180,6 @@ const electronBridge = window.electronAPI ?? {
   onGoBack: noop,
   onGoForward: noop,
 };
-
-function normalizeUrl(rawUrl) {
-  if (typeof rawUrl !== 'string') return '';
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return '';
-  return trimmed.startsWith('http://') || trimmed.startsWith('https://') ? trimmed : `https://${trimmed}`;
-}
 
 function readBool(key, fallback = false) {
   const raw = localStorage.getItem(key);
@@ -208,15 +203,6 @@ function readJson(key, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function isHexColor(value) {
-  return typeof value === 'string' && /^#(?:[0-9a-fA-F]{3}){1,2}$/.test(value);
-}
-
-function getFileNameFromPath(filePath) {
-  const parts = String(filePath).split(/[\\/]/);
-  return parts[parts.length - 1] || String(filePath);
 }
 
 function normalizeCamouflageIcon(pathValue, previewSrc = '') {
@@ -301,6 +287,7 @@ export default function App() {
   const [selectedIcon, setSelectedIcon] = useState(localStorage.getItem(STORAGE_KEYS.appIcon) || '');
 
   const [updateStatusText, setUpdateStatusText] = useState('未检查');
+  const [updateActionUrl, setUpdateActionUrl] = useState('');
   const [licenseInput, setLicenseInput] = useState('');
   const [licenseStatus, setLicenseStatus] = useState({
     text: '未激活',
@@ -1328,15 +1315,36 @@ export default function App() {
 
   const handleCheckUpdates = useCallback(async () => {
     setUpdateStatusText('检查中...');
+    setUpdateActionUrl('');
+
     try {
       const result = await electronBridge.checkForUpdates();
       const checkedAtText = result?.checkedAt ? `（${new Date(result.checkedAt).toLocaleTimeString()}）` : '';
+
+      if (result?.status === 'update-available' && typeof result?.releaseUrl === 'string' && result.releaseUrl.trim()) {
+        setUpdateActionUrl(result.releaseUrl.trim());
+      }
+
       setUpdateStatusText(`${result?.message || '检查完成'}${checkedAtText}`);
     } catch (error) {
       console.error('[renderer:checkForUpdates]', error);
+      setUpdateActionUrl('');
       setUpdateStatusText('检查失败');
     }
   }, []);
+
+  const handleOpenUpdateUrl = useCallback(async () => {
+    if (!updateActionUrl) return;
+    try {
+      const result = await electronBridge.openExternalUrl(updateActionUrl);
+      if (!result?.ok) {
+        showRuntimeAlert(result?.message || '打开下载页失败');
+      }
+    } catch (error) {
+      console.error('[renderer:openExternalUrl]', error);
+      showRuntimeAlert('打开下载页失败');
+    }
+  }, [updateActionUrl, showRuntimeAlert]);
 
   return (
     <div
@@ -1680,6 +1688,11 @@ export default function App() {
                     检查更新
                   </Button>
                   <span className="text-sm text-muted-foreground">{updateStatusText}</span>
+                  {updateActionUrl ? (
+                    <Button variant="secondary" size="sm" onClick={handleOpenUpdateUrl}>
+                      打开下载页
+                    </Button>
+                  ) : null}
                 </div>
 
                 <div className="flex items-center gap-2">

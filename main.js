@@ -1,6 +1,7 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage, shell, session } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { compareVersions } = require('./lib/update-utils');
 const { IPC_CHANNELS } = require('./ipc-channels');
 
 let mainWindow;
@@ -11,12 +12,16 @@ const ALLOWED_DEV_HOSTS = new Set(['127.0.0.1', 'localhost']);
 const ALLOWED_WEBVIEW_PROTOCOLS = new Set(['http:', 'https:']);
 const ALLOWED_WEBVIEW_SPECIAL_URLS = new Set(['about:blank']);
 const ALLOWED_WEBVIEW_PERMISSIONS = new Set(['fullscreen']);
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:']);
 const WEBVIEW_HOST_ALLOWLIST = new Set(
   String(process.env.MOYU_WEBVIEW_HOST_ALLOWLIST || '')
     .split(',')
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
 );
+const UPDATE_MANIFEST_URL = String(process.env.MOYU_UPDATE_MANIFEST_URL || '').trim();
+const UPDATE_GITHUB_REPO = String(process.env.MOYU_UPDATE_GITHUB_REPO || '').trim();
+const UPDATE_HTTP_TIMEOUT_MS = Number.parseInt(process.env.MOYU_UPDATE_HTTP_TIMEOUT_MS || '7000', 10);
 
 function normalizeHost(host) {
   return String(host || '').trim().toLowerCase();
@@ -146,6 +151,162 @@ function installPermissionHandlers() {
     };
     return shouldAllowWebviewPermission(webContents, permission, requestDetails);
   });
+}
+
+function isAllowedExternalUrl(rawUrl) {
+  const parsed = parseUrlSafely(rawUrl);
+  if (!parsed) return false;
+  return ALLOWED_EXTERNAL_PROTOCOLS.has(parsed.protocol);
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = UPDATE_HTTP_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs || 0));
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': `moyu-reader/${app.getVersion()}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timerId);
+  }
+}
+
+function normalizeReleaseUrl(urlValue) {
+  if (typeof urlValue !== 'string') return '';
+  const safeUrl = urlValue.trim();
+  if (!safeUrl) return '';
+  return isAllowedExternalUrl(safeUrl) ? safeUrl : '';
+}
+
+function parseReleaseFromManifest(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const latestVersion = typeof payload.version === 'string' ? payload.version.trim() : '';
+  if (!latestVersion) return null;
+
+  return {
+    version: latestVersion,
+    url: normalizeReleaseUrl(payload.url || payload.downloadUrl || ''),
+    notes: typeof payload.notes === 'string' ? payload.notes : '',
+    publishedAt: typeof payload.publishedAt === 'string' ? payload.publishedAt : '',
+    source: 'manifest',
+  };
+}
+
+function parseReleaseFromGithub(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const latestVersion = typeof payload.tag_name === 'string' ? payload.tag_name.trim() : '';
+  if (!latestVersion) return null;
+
+  const htmlUrl = normalizeReleaseUrl(payload.html_url || '');
+
+  return {
+    version: latestVersion,
+    url: htmlUrl,
+    notes: typeof payload.body === 'string' ? payload.body : '',
+    publishedAt: typeof payload.published_at === 'string' ? payload.published_at : '',
+    source: 'github',
+  };
+}
+
+async function resolveLatestReleaseInfo() {
+  if (UPDATE_MANIFEST_URL) {
+    const payload = await fetchJsonWithTimeout(UPDATE_MANIFEST_URL);
+    const parsed = parseReleaseFromManifest(payload);
+    if (!parsed) {
+      throw new Error('更新清单缺少 version 字段');
+    }
+    return parsed;
+  }
+
+  if (UPDATE_GITHUB_REPO) {
+    const apiUrl = `https://api.github.com/repos/${UPDATE_GITHUB_REPO}/releases/latest`;
+    const payload = await fetchJsonWithTimeout(apiUrl);
+    const parsed = parseReleaseFromGithub(payload);
+    if (!parsed) {
+      throw new Error('GitHub Release 数据缺少 tag_name');
+    }
+    return parsed;
+  }
+
+  return null;
+}
+
+async function checkForUpdates() {
+  const checkedAt = new Date().toISOString();
+  const currentVersion = app.getVersion();
+
+  if (!UPDATE_MANIFEST_URL && !UPDATE_GITHUB_REPO) {
+    return {
+      ok: false,
+      status: 'not-configured',
+      checkedAt,
+      currentVersion,
+      latestVersion: '',
+      releaseUrl: '',
+      source: '',
+      message: '未配置更新源（MOYU_UPDATE_MANIFEST_URL 或 MOYU_UPDATE_GITHUB_REPO）。',
+    };
+  }
+
+  try {
+    const latest = await resolveLatestReleaseInfo();
+    if (!latest) {
+      return {
+        ok: false,
+        status: 'not-configured',
+        checkedAt,
+        currentVersion,
+        latestVersion: '',
+        releaseUrl: '',
+        source: '',
+        message: '未找到可用更新源。',
+      };
+    }
+
+    const compared = compareVersions(currentVersion, latest.version);
+    const isUpdateAvailable = compared < 0;
+
+    return {
+      ok: true,
+      status: isUpdateAvailable ? 'update-available' : 'up-to-date',
+      checkedAt,
+      currentVersion,
+      latestVersion: latest.version,
+      releaseUrl: latest.url,
+      source: latest.source,
+      publishedAt: latest.publishedAt,
+      notes: latest.notes,
+      message: isUpdateAvailable
+        ? `发现新版本 ${latest.version}`
+        : `当前已是最新版（${currentVersion}）`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 'error',
+      checkedAt,
+      currentVersion,
+      latestVersion: '',
+      releaseUrl: '',
+      source: '',
+      message: `更新检查失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 function getAppLogoDir() {
@@ -463,12 +624,24 @@ ipcMain.handle(IPC_CHANNELS.getCamouflageIconPreview, async (event, iconPath) =>
 });
 
 ipcMain.handle(IPC_CHANNELS.checkForUpdates, async () => {
-  return {
-    ok: true,
-    status: 'manual',
-    checkedAt: new Date().toISOString(),
-    message: '自动更新尚未接入发布源，请前往发布页下载最新版安装包。',
-  };
+  return checkForUpdates();
+});
+
+ipcMain.handle(IPC_CHANNELS.openExternalUrl, async (event, rawUrl) => {
+  const safeUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!isAllowedExternalUrl(safeUrl)) {
+    return { ok: false, message: '仅支持打开 http/https 链接。' };
+  }
+
+  try {
+    await shell.openExternal(safeUrl);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `打开链接失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 });
 
 ipcMain.handle(IPC_CHANNELS.activateLicense, async (event, licenseKey) => {

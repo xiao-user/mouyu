@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test:regression": "vitest run",
+    "test:regression:watch": "vitest",
     "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check ipc-channels.js && node --check scripts/start-electron.js && node --check vite.config.js",
     "doctor": "node scripts/doctor-electron.js"
   },
@@ -21,7 +23,8 @@
     "electron": "^39.2.4",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.1",
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "vitest": "^4.1.0"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",
