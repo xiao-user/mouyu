@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage, shell, session } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { IPC_CHANNELS } = require('./ipc-channels');
@@ -8,6 +8,145 @@ const SUPPORTED_ICON_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.icns']);
 const LICENSE_FILE_NAME = 'license-state.json';
 const LICENSE_KEY_PATTERN = /^MOYU-[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+$/;
 const ALLOWED_DEV_HOSTS = new Set(['127.0.0.1', 'localhost']);
+const ALLOWED_WEBVIEW_PROTOCOLS = new Set(['http:', 'https:']);
+const ALLOWED_WEBVIEW_SPECIAL_URLS = new Set(['about:blank']);
+const ALLOWED_WEBVIEW_PERMISSIONS = new Set(['fullscreen']);
+const WEBVIEW_HOST_ALLOWLIST = new Set(
+  String(process.env.MOYU_WEBVIEW_HOST_ALLOWLIST || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function normalizeHost(host) {
+  return String(host || '').trim().toLowerCase();
+}
+
+function isHostAllowed(host) {
+  const safeHost = normalizeHost(host);
+  if (!safeHost) return false;
+  if (WEBVIEW_HOST_ALLOWLIST.size === 0) return true;
+  return WEBVIEW_HOST_ALLOWLIST.has(safeHost);
+}
+
+function parseUrlSafely(rawUrl) {
+  if (typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  try {
+    return new URL(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedWebviewUrl(rawUrl) {
+  const safeUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!safeUrl) return false;
+  if (ALLOWED_WEBVIEW_SPECIAL_URLS.has(safeUrl)) return true;
+
+  const parsed = parseUrlSafely(safeUrl);
+  if (!parsed) return false;
+  if (!ALLOWED_WEBVIEW_PROTOCOLS.has(parsed.protocol)) return false;
+  return isHostAllowed(parsed.hostname);
+}
+
+function getPermissionOrigin(details = {}, webContents) {
+  if (typeof details.requestingUrl === 'string' && details.requestingUrl.trim()) {
+    return details.requestingUrl;
+  }
+  if (typeof details.embeddingOrigin === 'string' && details.embeddingOrigin.trim()) {
+    return details.embeddingOrigin;
+  }
+  try {
+    return webContents?.getURL?.() || '';
+  } catch {
+    return '';
+  }
+}
+
+function shouldAllowWebviewPermission(webContents, permission, details = {}) {
+  if (!webContents || webContents.isDestroyed()) return false;
+  if (webContents.getType() !== 'webview') return true;
+  if (!ALLOWED_WEBVIEW_PERMISSIONS.has(permission)) return false;
+
+  const origin = getPermissionOrigin(details, webContents);
+  return isAllowedWebviewUrl(origin);
+}
+
+function hardenWebviewAttachment(event, webPreferences, params = {}) {
+  // 禁止 webview 注入自定义 preload，统一强制隔离与沙箱策略。
+  delete webPreferences.preload;
+  delete webPreferences.preloadURL;
+  webPreferences.nodeIntegration = false;
+  webPreferences.nodeIntegrationInSubFrames = false;
+  webPreferences.nodeIntegrationInWorker = false;
+  webPreferences.contextIsolation = true;
+  webPreferences.sandbox = true;
+  webPreferences.webSecurity = true;
+  webPreferences.allowRunningInsecureContent = false;
+  webPreferences.enableBlinkFeatures = '';
+  webPreferences.experimentalFeatures = false;
+  webPreferences.plugins = false;
+
+  params.allowpopups = false;
+  if (typeof params.preload === 'string') {
+    delete params.preload;
+  }
+
+  const targetUrl = typeof params.src === 'string' ? params.src : '';
+  if (!isAllowedWebviewUrl(targetUrl)) {
+    event.preventDefault();
+    console.warn('[security:webview] blocked attachment url:', targetUrl);
+  }
+}
+
+function attachWebviewGuards(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (!isAllowedWebviewUrl(url)) {
+      console.warn('[security:webview] blocked new-window url:', url);
+      return { action: 'deny' };
+    }
+
+    // 禁止新窗口，统一交给系统浏览器打开，减少 webview 攻击面。
+    shell.openExternal(url).catch((error) => {
+      console.error('[security:webview] openExternal failed:', error);
+    });
+    return { action: 'deny' };
+  });
+
+  const guardNavigation = (event, url) => {
+    if (isAllowedWebviewUrl(url)) return;
+    event.preventDefault();
+    console.warn('[security:webview] blocked navigation url:', url);
+  };
+
+  contents.on('will-navigate', guardNavigation);
+  contents.on('will-redirect', guardNavigation);
+}
+
+function installPermissionHandlers() {
+  const activeSession = session.defaultSession;
+  if (!activeSession) return;
+
+  activeSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const allowed = shouldAllowWebviewPermission(webContents, permission, details);
+    if (!allowed) {
+      const origin = getPermissionOrigin(details, webContents);
+      console.warn('[security:webview] blocked permission request:', permission, origin);
+    }
+    callback(allowed);
+  });
+
+  activeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    const requestDetails = {
+      ...(details || {}),
+      requestingUrl: requestingOrigin || details?.requestingUrl || '',
+    };
+    return shouldAllowWebviewPermission(webContents, permission, requestDetails);
+  });
+}
 
 function getAppLogoDir() {
   return path.resolve(path.join(app.getAppPath(), 'AppLogo'));
@@ -188,6 +327,8 @@ function createWindow() {
       sandbox: false,
     }
   });
+
+  mainWindow.webContents.on('will-attach-webview', hardenWebviewAttachment);
 
   loadRendererEntry(mainWindow).catch((error) => {
     console.error('Failed to load renderer entry:', error);
@@ -386,9 +527,12 @@ ipcMain.on(IPC_CHANNELS.changeIcon, (event, iconPath) => {
 });
 
 app.whenReady().then(() => {
+  installPermissionHandlers();
+
   app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() === 'webview') {
       contents.setMaxListeners(30);
+      attachWebviewGuards(contents);
     }
   });
 
