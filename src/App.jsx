@@ -303,7 +303,20 @@ export default function App() {
       : HEADER_PANEL_STYLE_DARK;
   const headerIconColor = darkMode ? 'rgba(15, 23, 42, 0.88)' : 'rgba(248, 250, 252, 0.95)';
   const headerHoverBgClass = darkMode ? 'hover:bg-black/25' : 'hover:bg-white/25';
-  const headerIconButtonClass = `${HEADER_ICON_BUTTON_CLASS} ${headerHoverBgClass} header-icon-button`;
+  const headerIconButtonClass = `${HEADER_ICON_BUTTON_CLASS} ${headerHoverBgClass} header-icon-button no-drag`;
+
+  const resetBookmarkEditor = useCallback(() => {
+    setIsAddingBookmark(false);
+    setEditingIndex(-1);
+    setBookmarkName('');
+    setBookmarkUrl('');
+  }, []);
+
+  const openBookmarksPanel = useCallback(() => {
+    setBookmarksOpen(true);
+    setBookmarkSearch('');
+    resetBookmarkEditor();
+  }, [resetBookmarkEditor]);
 
   const showRuntimeAlert = useCallback((message, timeoutMs = 7000) => {
     setRuntimeAlert({ visible: true, message });
@@ -921,9 +934,6 @@ export default function App() {
     };
     const bodyMouseLeave = () => {
       setIsMouseIn(false);
-      if (toolbarAutoHideEnabled && !opacityPopoverOpen) {
-        setToolbarVisible(false);
-      }
     };
 
     document.body.addEventListener('mouseenter', bodyMouseEnter);
@@ -933,32 +943,53 @@ export default function App() {
       document.body.removeEventListener('mouseenter', bodyMouseEnter);
       document.body.removeEventListener('mouseleave', bodyMouseLeave);
     };
-  }, [toolbarAutoHideEnabled, opacityPopoverOpen]);
+  }, []);
 
   useEffect(() => {
     if (!toolbarAutoHideEnabled) return undefined;
 
-    const handleMouseMove = (event) => {
+    let rafId = 0;
+    let latestMouseX = Number.NEGATIVE_INFINITY;
+    let latestMouseY = Number.POSITIVE_INFINITY;
+
+    const setToolbarVisibleIfChanged = (nextVisible) => {
+      setToolbarVisible((prev) => (prev === nextVisible ? prev : nextVisible));
+    };
+
+    const evaluateToolbarVisibility = () => {
+      rafId = 0;
       if (opacityPopoverOpen) return;
 
       const toolbar = toolbarRef.current;
-      if (toolbar?.matches(':hover')) {
-        setToolbarVisible(true);
+      const toolbarRect = toolbar?.getBoundingClientRect();
+      const isInsideToolbar =
+        Boolean(toolbarRect) &&
+        latestMouseX >= toolbarRect.left &&
+        latestMouseX <= toolbarRect.right &&
+        latestMouseY >= toolbarRect.top &&
+        latestMouseY <= toolbarRect.bottom;
+      if (isInsideToolbar) {
+        setToolbarVisibleIfChanged(true);
         return;
       }
 
-      const toolbarBottom = toolbar ? Math.round(toolbar.getBoundingClientRect().bottom) : TOOLBAR_REVEAL_ZONE;
+      const toolbarBottom = toolbarRect ? Math.round(toolbarRect.bottom) : TOOLBAR_REVEAL_ZONE;
       const revealThreshold = Math.max(16, Math.min(TOOLBAR_REVEAL_ZONE, toolbarBottom));
-      if (event.clientY <= revealThreshold) {
-        setToolbarVisible(true);
-        return;
-      }
-
-      setToolbarVisible(false);
+      setToolbarVisibleIfChanged(latestMouseY <= revealThreshold);
     };
 
-    document.addEventListener('mousemove', handleMouseMove);
+    const handleMouseMove = (event) => {
+      latestMouseX = event.clientX;
+      latestMouseY = event.clientY;
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(evaluateToolbarVisibility);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove, { passive: true });
     return () => {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+      }
       document.removeEventListener('mousemove', handleMouseMove);
     };
   }, [toolbarAutoHideEnabled, opacityPopoverOpen]);
@@ -1097,7 +1128,7 @@ export default function App() {
 
     unsubscribeToggleBookmarks =
       electronBridge.onToggleBookmarks?.(() => {
-        setBookmarksOpen(true);
+        openBookmarksPanel();
       }) ?? null;
 
     unsubscribeGoBack =
@@ -1142,7 +1173,7 @@ export default function App() {
       if (typeof unsubscribeGoBack === 'function') unsubscribeGoBack();
       if (typeof unsubscribeGoForward === 'function') unsubscribeGoForward();
     };
-  }, []);
+  }, [openBookmarksPanel]);
 
   useEffect(() => {
     loadCamouflageIcons();
@@ -1195,13 +1226,6 @@ export default function App() {
       return name.includes(keyword) || url.includes(keyword);
     });
   }, [bookmarks, bookmarkSearch]);
-
-  const resetBookmarkEditor = useCallback(() => {
-    setIsAddingBookmark(false);
-    setEditingIndex(-1);
-    setBookmarkName('');
-    setBookmarkUrl('');
-  }, []);
 
   const startBookmarkAdd = useCallback(() => {
     setIsAddingBookmark(true);
@@ -1348,7 +1372,7 @@ export default function App() {
 
   return (
     <div
-      className="relative h-full w-full"
+      className="relative h-full w-full overflow-hidden rounded-xl"
       style={{ opacity: containerOpacity, background: 'transparent' }}
     >
       {runtimeAlert.visible ? (
@@ -1374,14 +1398,9 @@ export default function App() {
             setToolbarVisible(true);
           }
         }}
-        onMouseLeave={() => {
-          if (toolbarAutoHideEnabled && !opacityPopoverOpen) {
-            setToolbarVisible(false);
-          }
-        }}
       >
         <div
-          className="no-drag flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
+          className="flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
           style={{ ...headerPanelStyle, color: headerIconColor }}
         >
           <Button
@@ -1471,7 +1490,7 @@ export default function App() {
         </div>
 
         <div
-          className="no-drag flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
+          className="flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
           style={{ ...headerPanelStyle, color: headerIconColor }}
         >
           <Button
@@ -1512,11 +1531,7 @@ export default function App() {
             variant="ghost"
             size="icon"
             className={headerIconButtonClass}
-            onClick={() => {
-              setBookmarksOpen(true);
-              setBookmarkSearch('');
-              resetBookmarkEditor();
-            }}
+            onClick={openBookmarksPanel}
             title="网址管理"
           >
             <HeaderSvgIcon svg={HEADER_ICON_SVGS.bookmark} />
@@ -1572,7 +1587,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="h-[calc(100%-60px)]">
+      <main className="h-[calc(100%-42px)]">
         <webview
           ref={webviewRef}
           id="browser-view"
