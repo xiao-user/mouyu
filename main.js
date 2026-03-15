@@ -1,6 +1,7 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, Menu, safeStorage, nativeImage, shell, session } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { autoUpdater } = require('electron-updater');
 const { compareVersions } = require('./lib/update-utils');
 const { IPC_CHANNELS } = require('./ipc-channels');
 
@@ -22,6 +23,38 @@ const WEBVIEW_HOST_ALLOWLIST = new Set(
 const UPDATE_MANIFEST_URL = String(process.env.MOYU_UPDATE_MANIFEST_URL || '').trim();
 const UPDATE_GITHUB_REPO = String(process.env.MOYU_UPDATE_GITHUB_REPO || '').trim();
 const UPDATE_HTTP_TIMEOUT_MS = Number.parseInt(process.env.MOYU_UPDATE_HTTP_TIMEOUT_MS || '7000', 10);
+const UPDATE_FEED_URL = String(process.env.MOYU_UPDATE_FEED_URL || '').trim();
+const AUTO_UPDATE_CHECK_INTERVAL_MS = Number.parseInt(
+  process.env.MOYU_AUTO_UPDATE_CHECK_INTERVAL_MS || String(4 * 60 * 60 * 1000),
+  10
+);
+const AUTO_UPDATE_STARTUP_DELAY_MS = Number.parseInt(
+  process.env.MOYU_AUTO_UPDATE_STARTUP_DELAY_MS || '15000',
+  10
+);
+const ENABLE_DEV_AUTO_UPDATE = String(process.env.MOYU_DEV_AUTO_UPDATE || '') === 'true';
+
+let autoUpdateCheckTimer = null;
+let isAutoUpdaterInitialized = false;
+let isAutoUpdateChecking = false;
+let updateState = {
+  ok: true,
+  status: 'idle',
+  message: '未检查',
+  checkedAt: '',
+  currentVersion: app.getVersion(),
+  latestVersion: '',
+  releaseUrl: '',
+  source: '',
+  publishedAt: '',
+  notes: '',
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  canInstall: false,
+  supportsAutoUpdate: false,
+};
 
 function normalizeHost(host) {
   return String(host || '').trim().toLowerCase();
@@ -246,67 +279,351 @@ async function resolveLatestReleaseInfo() {
   return null;
 }
 
-async function checkForUpdates() {
+function getUpdateStateSnapshot() {
+  return { ...updateState };
+}
+
+function broadcastUpdateState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send(IPC_CHANNELS.updateStateChanged, getUpdateStateSnapshot());
+}
+
+function patchUpdateState(patch = {}) {
+  updateState = {
+    ...updateState,
+    ...patch,
+  };
+  broadcastUpdateState();
+  return getUpdateStateSnapshot();
+}
+
+function supportsAutoUpdate() {
+  return app.isPackaged || ENABLE_DEV_AUTO_UPDATE;
+}
+
+function getGithubReleasePageUrl() {
+  if (!UPDATE_GITHUB_REPO) return '';
+  return `https://github.com/${UPDATE_GITHUB_REPO}/releases`;
+}
+
+function normalizeAutoUpdateError(error) {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error || '未知错误');
+}
+
+async function checkForUpdatesFallback() {
   const checkedAt = new Date().toISOString();
   const currentVersion = app.getVersion();
 
   if (!UPDATE_MANIFEST_URL && !UPDATE_GITHUB_REPO) {
-    return {
+    return patchUpdateState({
       ok: false,
       status: 'not-configured',
+      supportsAutoUpdate: false,
       checkedAt,
       currentVersion,
       latestVersion: '',
       releaseUrl: '',
       source: '',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
       message: '未配置更新源（MOYU_UPDATE_MANIFEST_URL 或 MOYU_UPDATE_GITHUB_REPO）。',
-    };
+    });
   }
 
   try {
     const latest = await resolveLatestReleaseInfo();
     if (!latest) {
-      return {
+      return patchUpdateState({
         ok: false,
         status: 'not-configured',
+        supportsAutoUpdate: false,
         checkedAt,
         currentVersion,
         latestVersion: '',
         releaseUrl: '',
         source: '',
+        percent: 0,
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+        canInstall: false,
         message: '未找到可用更新源。',
-      };
+      });
     }
 
     const compared = compareVersions(currentVersion, latest.version);
     const isUpdateAvailable = compared < 0;
 
-    return {
+    return patchUpdateState({
       ok: true,
       status: isUpdateAvailable ? 'update-available' : 'up-to-date',
+      supportsAutoUpdate: false,
       checkedAt,
       currentVersion,
       latestVersion: latest.version,
-      releaseUrl: latest.url,
+      releaseUrl: latest.url || getGithubReleasePageUrl(),
       source: latest.source,
       publishedAt: latest.publishedAt,
       notes: latest.notes,
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
       message: isUpdateAvailable
         ? `发现新版本 ${latest.version}`
         : `当前已是最新版（${currentVersion}）`,
-    };
+    });
   } catch (error) {
-    return {
+    return patchUpdateState({
       ok: false,
       status: 'error',
+      supportsAutoUpdate: false,
       checkedAt,
       currentVersion,
       latestVersion: '',
-      releaseUrl: '',
+      releaseUrl: getGithubReleasePageUrl(),
       source: '',
-      message: `更新检查失败：${error instanceof Error ? error.message : String(error)}`,
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      message: `更新检查失败：${normalizeAutoUpdateError(error)}`,
+    });
+  }
+}
+
+function initAutoUpdater() {
+  if (isAutoUpdaterInitialized) return;
+  isAutoUpdaterInitialized = true;
+
+  if (!app.isPackaged && ENABLE_DEV_AUTO_UPDATE) {
+    autoUpdater.forceDevUpdateConfig = true;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = false;
+
+  if (UPDATE_FEED_URL) {
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: UPDATE_FEED_URL,
+    });
+  }
+
+  autoUpdater.on('checking-for-update', () => {
+    patchUpdateState({
+      ok: true,
+      status: 'checking',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: '检查更新中...',
+    });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    patchUpdateState({
+      ok: true,
+      status: 'downloading',
+      checkedAt: new Date().toISOString(),
+      latestVersion: info?.version || '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `发现新版本 ${info?.version || ''}，正在后台下载...`,
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const percent = Number.isFinite(progress?.percent) ? progress.percent : 0;
+    patchUpdateState({
+      ok: true,
+      status: 'downloading',
+      percent: Math.max(0, Math.min(100, percent)),
+      transferred: Number.isFinite(progress?.transferred) ? progress.transferred : 0,
+      total: Number.isFinite(progress?.total) ? progress.total : 0,
+      bytesPerSecond: Number.isFinite(progress?.bytesPerSecond) ? progress.bytesPerSecond : 0,
+      supportsAutoUpdate: true,
+      message: `正在下载更新 ${Math.max(0, Math.min(100, percent)).toFixed(1)}%`,
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    patchUpdateState({
+      ok: true,
+      status: 'update-downloaded',
+      checkedAt: new Date().toISOString(),
+      latestVersion: info?.version || updateState.latestVersion || '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 100,
+      canInstall: true,
+      supportsAutoUpdate: true,
+      message: `更新已下载完成（${info?.version || updateState.latestVersion || ''}），可重启安装。`,
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    patchUpdateState({
+      ok: true,
+      status: 'up-to-date',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `当前已是最新版（${app.getVersion()}）`,
+    });
+  });
+
+  autoUpdater.on('error', (error) => {
+    patchUpdateState({
+      ok: false,
+      status: 'error',
+      checkedAt: new Date().toISOString(),
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `自动更新失败：${normalizeAutoUpdateError(error)}`,
+    });
+  });
+}
+
+async function checkForUpdates() {
+  if (!supportsAutoUpdate()) {
+    const fallback = await checkForUpdatesFallback();
+    return patchUpdateState({
+      ...fallback,
+      supportsAutoUpdate: false,
+      message: `${fallback.message}（当前为开发模式，自动下载安装仅在打包后可用）`,
+    });
+  }
+
+  initAutoUpdater();
+  if (isAutoUpdateChecking) {
+    return getUpdateStateSnapshot();
+  }
+
+  isAutoUpdateChecking = true;
+  try {
+    await autoUpdater.checkForUpdates();
+    return getUpdateStateSnapshot();
+  } catch (error) {
+    return patchUpdateState({
+      ok: false,
+      status: 'error',
+      checkedAt: new Date().toISOString(),
+      currentVersion: app.getVersion(),
+      latestVersion: '',
+      releaseUrl: getGithubReleasePageUrl(),
+      source: UPDATE_FEED_URL ? 'generic' : 'auto-updater',
+      percent: 0,
+      transferred: 0,
+      total: 0,
+      bytesPerSecond: 0,
+      canInstall: false,
+      supportsAutoUpdate: true,
+      message: `更新检查失败：${normalizeAutoUpdateError(error)}`,
+    });
+  } finally {
+    isAutoUpdateChecking = false;
+  }
+}
+
+async function installUpdateNow() {
+  if (!supportsAutoUpdate()) {
+    return {
+      ok: false,
+      message: '当前为开发模式，自动安装仅在打包版本可用。',
+      state: getUpdateStateSnapshot(),
     };
   }
+
+  if (!updateState.canInstall || updateState.status !== 'update-downloaded') {
+    return {
+      ok: false,
+      message: '尚未下载可安装的更新包。',
+      state: getUpdateStateSnapshot(),
+    };
+  }
+
+  patchUpdateState({
+    message: '正在重启并安装更新...',
+  });
+
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+    } catch (error) {
+      patchUpdateState({
+        ok: false,
+        status: 'error',
+        canInstall: true,
+        message: `执行安装失败：${normalizeAutoUpdateError(error)}`,
+      });
+    }
+  });
+
+  return {
+    ok: true,
+    message: '正在重启并安装更新...',
+    state: getUpdateStateSnapshot(),
+  };
+}
+
+function scheduleAutoUpdateChecks() {
+  if (!supportsAutoUpdate()) return;
+  const safeDelay = Number.isFinite(AUTO_UPDATE_STARTUP_DELAY_MS) && AUTO_UPDATE_STARTUP_DELAY_MS > 0
+    ? AUTO_UPDATE_STARTUP_DELAY_MS
+    : 15000;
+  const safeInterval = Number.isFinite(AUTO_UPDATE_CHECK_INTERVAL_MS) && AUTO_UPDATE_CHECK_INTERVAL_MS > 0
+    ? AUTO_UPDATE_CHECK_INTERVAL_MS
+    : 4 * 60 * 60 * 1000;
+
+  setTimeout(() => {
+    checkForUpdates().catch((error) => {
+      console.error('[auto-update:start-check]', error);
+    });
+  }, safeDelay);
+
+  if (autoUpdateCheckTimer) {
+    clearInterval(autoUpdateCheckTimer);
+  }
+  autoUpdateCheckTimer = setInterval(() => {
+    checkForUpdates().catch((error) => {
+      console.error('[auto-update:interval-check]', error);
+    });
+  }, safeInterval);
 }
 
 function getAppLogoDir() {
@@ -494,6 +811,9 @@ function createWindow() {
   loadRendererEntry(mainWindow).catch((error) => {
     console.error('Failed to load renderer entry:', error);
   });
+  mainWindow.webContents.on('did-finish-load', () => {
+    broadcastUpdateState();
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -627,6 +947,14 @@ ipcMain.handle(IPC_CHANNELS.checkForUpdates, async () => {
   return checkForUpdates();
 });
 
+ipcMain.handle(IPC_CHANNELS.getUpdateState, async () => {
+  return getUpdateStateSnapshot();
+});
+
+ipcMain.handle(IPC_CHANNELS.installUpdateNow, async () => {
+  return installUpdateNow();
+});
+
 ipcMain.handle(IPC_CHANNELS.openExternalUrl, async (event, rawUrl) => {
   const safeUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!isAllowedExternalUrl(safeUrl)) {
@@ -701,6 +1029,19 @@ ipcMain.on(IPC_CHANNELS.changeIcon, (event, iconPath) => {
 
 app.whenReady().then(() => {
   installPermissionHandlers();
+  patchUpdateState({
+    currentVersion: app.getVersion(),
+    releaseUrl: getGithubReleasePageUrl(),
+    supportsAutoUpdate: supportsAutoUpdate(),
+    message: supportsAutoUpdate()
+      ? '等待自动检查更新...'
+      : '当前为开发模式，自动下载安装仅在打包后可用。',
+  });
+
+  if (supportsAutoUpdate()) {
+    initAutoUpdater();
+    scheduleAutoUpdateChecks();
+  }
 
   app.on('web-contents-created', (_event, contents) => {
     if (contents.getType() === 'webview') {
@@ -722,5 +1063,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  if (autoUpdateCheckTimer) {
+    clearInterval(autoUpdateCheckTimer);
+    autoUpdateCheckTimer = null;
+  }
   globalShortcut.unregisterAll();
 });
