@@ -35,6 +35,7 @@ import iconBookmarkEditRaw from '@/assets/icons/bookmarks/IconPageEdit.svg?raw';
 import iconBookmarkDeleteRaw from '@/assets/icons/bookmarks/IconTrashCan.svg?raw';
 
 const TOOLBAR_REVEAL_ZONE = 56;
+const AUTO_HIDE_DIM_OPACITY = 0.08;
 const HEADER_PANEL_STYLE_DARK = {
   background:
     'linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0.22) 100%)',
@@ -340,7 +341,7 @@ export default function App() {
   });
 
   const webviewInteractionLocked = opacityPopoverOpen || (autoHideEnabled && !isMouseIn);
-  const containerOpacity = autoHideEnabled && !isMouseIn ? 0.01 : opacity;
+  const containerOpacity = autoHideEnabled && !isMouseIn ? AUTO_HIDE_DIM_OPACITY : opacity;
   const headerPanelStyle = transparentMode
     ? HEADER_PANEL_STYLE_TRANSPARENT
     : darkMode
@@ -973,19 +974,36 @@ export default function App() {
   }, [selectedIcon]);
 
   useEffect(() => {
-    const bodyMouseEnter = () => {
+    const markInside = () => {
       setIsMouseIn(true);
     };
-    const bodyMouseLeave = () => {
+
+    const markOutsideIfLeavingViewport = (event) => {
+      if (event.relatedTarget) return;
+
+      const x = Number.isFinite(event.clientX) ? event.clientX : -1;
+      const y = Number.isFinite(event.clientY) ? event.clientY : -1;
+      const leavingViewport =
+        x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight;
+      if (leavingViewport) {
+        setIsMouseIn(false);
+      }
+    };
+
+    const markOutsideOnBlur = () => {
       setIsMouseIn(false);
     };
 
-    document.body.addEventListener('mouseenter', bodyMouseEnter);
-    document.body.addEventListener('mouseleave', bodyMouseLeave);
+    window.addEventListener('mousemove', markInside, { passive: true });
+    window.addEventListener('focus', markInside);
+    window.addEventListener('blur', markOutsideOnBlur);
+    document.addEventListener('mouseout', markOutsideIfLeavingViewport);
 
     return () => {
-      document.body.removeEventListener('mouseenter', bodyMouseEnter);
-      document.body.removeEventListener('mouseleave', bodyMouseLeave);
+      window.removeEventListener('mousemove', markInside);
+      window.removeEventListener('focus', markInside);
+      window.removeEventListener('blur', markOutsideOnBlur);
+      document.removeEventListener('mouseout', markOutsideIfLeavingViewport);
     };
   }, []);
 
