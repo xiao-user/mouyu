@@ -1,5 +1,22 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { IPC_CHANNELS } = require('./ipc-channels');
+
+// Sandboxed preload cannot reliably depend on local CommonJS modules.
+const IPC_CHANNELS = {
+  setAlwaysOnTop: 'set-always-on-top',
+  windowMinimize: 'window-min',
+  windowClose: 'window-close',
+  changeIcon: 'change-icon',
+  listCamouflageIcons: 'list-camouflage-icons',
+  getCamouflageIconPreview: 'get-camouflage-icon-preview',
+  toggleTransparency: 'toggle-transparency',
+  toggleBookmarks: 'toggle-bookmarks',
+  goBack: 'go-back',
+  goForward: 'go-forward',
+  checkForUpdates: 'check-for-updates',
+  openExternalUrl: 'open-external-url',
+  activateLicense: 'activate-license',
+  getLicenseStatus: 'get-license-status',
+};
 
 contextBridge.exposeInMainWorld('electronAPI', {
   windowClose: () => ipcRenderer.send(IPC_CHANNELS.windowClose),
@@ -9,8 +26,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listCamouflageIcons: () => ipcRenderer.invoke(IPC_CHANNELS.listCamouflageIcons),
   getCamouflageIconPreview: (iconPath) => ipcRenderer.invoke(IPC_CHANNELS.getCamouflageIconPreview, iconPath),
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.checkForUpdates),
-  getUpdateState: () => ipcRenderer.invoke(IPC_CHANNELS.getUpdateState),
-  installUpdateNow: () => ipcRenderer.invoke(IPC_CHANNELS.installUpdateNow),
   openExternalUrl: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternalUrl, url),
   activateLicense: (licenseKey) => ipcRenderer.invoke(IPC_CHANNELS.activateLicense, licenseKey),
   getLicenseStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getLicenseStatus),
@@ -37,11 +52,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => callback();
     ipcRenderer.on(IPC_CHANNELS.goForward, listener);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.goForward, listener);
-  },
-  onUpdateStateChanged: (callback) => {
-    if (typeof callback !== 'function') return undefined;
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on(IPC_CHANNELS.updateStateChanged, listener);
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.updateStateChanged, listener);
   },
 });
