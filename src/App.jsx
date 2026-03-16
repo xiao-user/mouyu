@@ -299,10 +299,10 @@ export default function App() {
   const headerPanelStyle = transparentMode
     ? HEADER_PANEL_STYLE_TRANSPARENT
     : darkMode
-      ? HEADER_PANEL_STYLE_LIGHT
-      : HEADER_PANEL_STYLE_DARK;
-  const headerIconColor = darkMode ? 'rgba(15, 23, 42, 0.88)' : 'rgba(248, 250, 252, 0.95)';
-  const headerHoverBgClass = darkMode ? 'hover:bg-black/25' : 'hover:bg-white/25';
+      ? HEADER_PANEL_STYLE_DARK
+      : HEADER_PANEL_STYLE_LIGHT;
+  const headerIconColor = darkMode ? 'rgba(248, 250, 252, 0.95)' : 'rgba(15, 23, 42, 0.88)';
+  const headerHoverBgClass = darkMode ? 'hover:bg-white/25' : 'hover:bg-black/25';
   const headerIconButtonClass = `${HEADER_ICON_BUTTON_CLASS} ${headerHoverBgClass} header-icon-button no-drag`;
 
   const resetBookmarkEditor = useCallback(() => {
@@ -846,8 +846,7 @@ export default function App() {
   }, [darkMode, applyDarkModeToWebview]);
 
   useEffect(() => {
-    // Keep UI theme direction aligned with existing darkMode semantics used by webview rendering.
-    const isUiDark = !darkMode;
+    const isUiDark = darkMode;
     document.documentElement.classList.toggle('dark', isUiDark);
     document.body.classList.toggle('dark', isUiDark);
   }, [darkMode]);
@@ -1400,7 +1399,7 @@ export default function App() {
         }}
       >
         <div
-          className="flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
+          className="drag-region flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
           style={{ ...headerPanelStyle, color: headerIconColor }}
         >
           <Button
@@ -1490,7 +1489,7 @@ export default function App() {
         </div>
 
         <div
-          className="flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
+          className="drag-region flex items-center gap-1 rounded-full bg-black/20 px-2 py-1"
           style={{ ...headerPanelStyle, color: headerIconColor }}
         >
           <Button
