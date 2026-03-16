@@ -68,4 +68,4 @@ jobs:
 
       - name: Build And Publish (Unsigned Fallback)
         if: ${{ (matrix.os == 'macos-latest' && (env.MAC_CSC_LINK == '' || env.MAC_CSC_KEY_PASSWORD == '' || env.APPLE_ID == '' || env.APPLE_APP_SPECIFIC_PASSWORD == '' || env.APPLE_TEAM_ID == '')) || (matrix.os == 'windows-latest' && (env.WIN_CSC_LINK == '' || env.WIN_CSC_KEY_PASSWORD == '')) }}
-        run: npm run build && npx cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish always -c.publish.provider=github
+        run: npx cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run release:github
