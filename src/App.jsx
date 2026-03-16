@@ -164,6 +164,24 @@ const DEFAULT_BOOKMARKS = [
 ];
 
 const noop = () => {};
+const DEFAULT_UPDATE_STATE = {
+  ok: false,
+  status: 'idle',
+  message: '未检查',
+  checkedAt: '',
+  currentVersion: '',
+  latestVersion: '',
+  releaseUrl: '',
+  source: '',
+  publishedAt: '',
+  notes: '',
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  canInstall: false,
+  supportsAutoUpdate: false,
+};
 const electronBridge = window.electronAPI ?? {
   windowClose: noop,
   windowMinimize: noop,
@@ -171,7 +189,14 @@ const electronBridge = window.electronAPI ?? {
   changeIcon: noop,
   listCamouflageIcons: async () => [],
   getCamouflageIconPreview: async () => '',
-  checkForUpdates: async () => ({ ok: false, message: '更新功能不可用。' }),
+  checkForUpdates: async () => ({
+    ...DEFAULT_UPDATE_STATE,
+    ok: false,
+    status: 'error',
+    message: '更新功能不可用。',
+  }),
+  getUpdateState: async () => ({ ...DEFAULT_UPDATE_STATE }),
+  installUpdateNow: async () => ({ ok: false, message: '安装更新功能不可用。', state: { ...DEFAULT_UPDATE_STATE } }),
   openExternalUrl: async () => ({ ok: false, message: '打开外链功能不可用。' }),
   activateLicense: async () => ({ ok: false, message: '激活功能不可用。' }),
   getLicenseStatus: async () => ({ activated: false, maskedKey: '', activatedAt: '' }),
@@ -179,6 +204,7 @@ const electronBridge = window.electronAPI ?? {
   onToggleBookmarks: noop,
   onGoBack: noop,
   onGoForward: noop,
+  onUpdateStateChanged: noop,
 };
 
 function readBool(key, fallback = false) {
@@ -220,6 +246,26 @@ function isWebviewLifecycleError(error) {
   const message = error?.message;
   if (typeof message !== 'string') return false;
   return message.includes('The WebView must be attached to the DOM');
+}
+
+function normalizeUpdateState(raw) {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_UPDATE_STATE };
+
+  const percent = Number.parseFloat(raw.percent);
+  const transferred = Number.parseFloat(raw.transferred);
+  const total = Number.parseFloat(raw.total);
+  const bytesPerSecond = Number.parseFloat(raw.bytesPerSecond);
+
+  return {
+    ...DEFAULT_UPDATE_STATE,
+    ...raw,
+    percent: Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0,
+    transferred: Number.isFinite(transferred) ? Math.max(0, transferred) : 0,
+    total: Number.isFinite(total) ? Math.max(0, total) : 0,
+    bytesPerSecond: Number.isFinite(bytesPerSecond) ? Math.max(0, bytesPerSecond) : 0,
+    canInstall: Boolean(raw.canInstall),
+    supportsAutoUpdate: Boolean(raw.supportsAutoUpdate),
+  };
 }
 
 export default function App() {
@@ -286,8 +332,7 @@ export default function App() {
   const [iconPaths, setIconPaths] = useState([]);
   const [selectedIcon, setSelectedIcon] = useState(localStorage.getItem(STORAGE_KEYS.appIcon) || '');
 
-  const [updateStatusText, setUpdateStatusText] = useState('未检查');
-  const [updateActionUrl, setUpdateActionUrl] = useState('');
+  const [updateState, setUpdateState] = useState(() => ({ ...DEFAULT_UPDATE_STATE }));
   const [licenseInput, setLicenseInput] = useState('');
   const [licenseStatus, setLicenseStatus] = useState({
     text: '未激活',
@@ -846,7 +891,6 @@ export default function App() {
   }, [darkMode, applyDarkModeToWebview]);
 
   useEffect(() => {
-    // Keep UI theme direction aligned with existing darkMode semantics used by webview rendering.
     const isUiDark = darkMode;
     document.documentElement.classList.toggle('dark', isUiDark);
     document.body.classList.toggle('dark', isUiDark);
@@ -1176,6 +1220,31 @@ export default function App() {
   }, [openBookmarksPanel]);
 
   useEffect(() => {
+    let mounted = true;
+    let unsubscribeUpdateState = null;
+
+    electronBridge
+      .getUpdateState?.()
+      .then((state) => {
+        if (!mounted) return;
+        applyUpdateState(state);
+      })
+      .catch((error) => {
+        console.error('[renderer:getUpdateState]', error);
+      });
+
+    unsubscribeUpdateState =
+      electronBridge.onUpdateStateChanged?.((state) => {
+        applyUpdateState(state);
+      }) ?? null;
+
+    return () => {
+      mounted = false;
+      if (typeof unsubscribeUpdateState === 'function') unsubscribeUpdateState();
+    };
+  }, [applyUpdateState]);
+
+  useEffect(() => {
     loadCamouflageIcons();
   }, [loadCamouflageIcons]);
 
@@ -1337,30 +1406,24 @@ export default function App() {
     }
   }, [licenseInput, showRuntimeAlert, refreshLicenseStatus]);
 
-  const handleCheckUpdates = useCallback(async () => {
-    setUpdateStatusText('检查中...');
-    setUpdateActionUrl('');
-
-    try {
-      const result = await electronBridge.checkForUpdates();
-      const checkedAtText = result?.checkedAt ? `（${new Date(result.checkedAt).toLocaleTimeString()}）` : '';
-
-      if (result?.status === 'update-available' && typeof result?.releaseUrl === 'string' && result.releaseUrl.trim()) {
-        setUpdateActionUrl(result.releaseUrl.trim());
-      }
-
-      setUpdateStatusText(`${result?.message || '检查完成'}${checkedAtText}`);
-    } catch (error) {
-      console.error('[renderer:checkForUpdates]', error);
-      setUpdateActionUrl('');
-      setUpdateStatusText('检查失败');
-    }
+  const applyUpdateState = useCallback((nextState) => {
+    setUpdateState(normalizeUpdateState(nextState));
   }, []);
 
-  const handleOpenUpdateUrl = useCallback(async () => {
-    if (!updateActionUrl) return;
+  const handleCheckUpdates = useCallback(async () => {
     try {
-      const result = await electronBridge.openExternalUrl(updateActionUrl);
+      const result = await electronBridge.checkForUpdates();
+      applyUpdateState(result);
+    } catch (error) {
+      console.error('[renderer:checkForUpdates]', error);
+      showRuntimeAlert('检查更新失败');
+    }
+  }, [applyUpdateState, showRuntimeAlert]);
+
+  const handleOpenUpdateUrl = useCallback(async () => {
+    if (!updateState.releaseUrl) return;
+    try {
+      const result = await electronBridge.openExternalUrl(updateState.releaseUrl);
       if (!result?.ok) {
         showRuntimeAlert(result?.message || '打开下载页失败');
       }
@@ -1368,7 +1431,30 @@ export default function App() {
       console.error('[renderer:openExternalUrl]', error);
       showRuntimeAlert('打开下载页失败');
     }
-  }, [updateActionUrl, showRuntimeAlert]);
+  }, [updateState.releaseUrl, showRuntimeAlert]);
+
+  const handleInstallUpdateNow = useCallback(async () => {
+    try {
+      const result = await electronBridge.installUpdateNow();
+      if (!result?.ok) {
+        showRuntimeAlert(result?.message || '尚未准备好安装更新');
+      }
+      if (result?.state) {
+        applyUpdateState(result.state);
+      }
+    } catch (error) {
+      console.error('[renderer:installUpdateNow]', error);
+      showRuntimeAlert('执行更新安装失败');
+    }
+  }, [applyUpdateState, showRuntimeAlert]);
+
+  const updateCheckedAtText = updateState.checkedAt
+    ? `（${new Date(updateState.checkedAt).toLocaleTimeString()}）`
+    : '';
+  const updateStatusText = `${updateState.message || '未检查'}${updateCheckedAtText}`;
+  const shouldShowUpdateProgress = updateState.status === 'downloading';
+  const updateProgressPercent = Math.max(0, Math.min(100, Number(updateState.percent) || 0));
+  const canInstallUpdate = updateState.status === 'update-downloaded' && updateState.canInstall;
 
   return (
     <div
@@ -1698,15 +1784,44 @@ export default function App() {
             <TabsContent value="system" className="space-y-4">
               <Card className="space-y-4 p-4">
                 <h3 className="text-base font-semibold">更新与激活</h3>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button variant="outline" size="sm" onClick={handleCheckUpdates}>
                     检查更新
                   </Button>
-                  <span className="text-sm text-muted-foreground">{updateStatusText}</span>
-                  {updateActionUrl ? (
-                    <Button variant="secondary" size="sm" onClick={handleOpenUpdateUrl}>
-                      打开下载页
+                  {canInstallUpdate ? (
+                    <Button variant="default" size="sm" onClick={handleInstallUpdateNow}>
+                      重启并安装
                     </Button>
+                  ) : null}
+                  {updateState.releaseUrl ? (
+                    <Button variant="secondary" size="sm" onClick={handleOpenUpdateUrl}>
+                      打开发布页
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="space-y-1.5">
+                  <span className="text-sm text-muted-foreground">{updateStatusText}</span>
+                  {updateState.latestVersion ? (
+                    <div className="text-xs text-muted-foreground">
+                      最新版本：{updateState.latestVersion}
+                      {updateState.currentVersion ? `（当前 ${updateState.currentVersion}）` : ''}
+                    </div>
+                  ) : null}
+                  {!updateState.supportsAutoUpdate ? (
+                    <div className="text-xs text-amber-600">
+                      当前环境不支持自动下载安装，可先检查后打开发布页手动更新。
+                    </div>
+                  ) : null}
+                  {shouldShowUpdateProgress ? (
+                    <div className="space-y-1">
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-primary transition-[width] duration-200"
+                          style={{ width: `${updateProgressPercent}%` }}
+                        />
+                      </div>
+                      <div className="text-xs text-muted-foreground">下载进度：{updateProgressPercent.toFixed(1)}%</div>
+                    </div>
                   ) : null}
                 </div>
 
