@@ -49,8 +49,12 @@ jobs:
       - name: Run Regression Tests
         run: npm run test:regression
 
+      - name: Build Package (Workflow Dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: npm run dist
+
       - name: Build And Publish (Signed macOS)
-        if: ${{ matrix.os == 'macos-latest' && env.MAC_CSC_LINK != '' && env.MAC_CSC_KEY_PASSWORD != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != '' }}
+        if: ${{ github.event_name != 'workflow_dispatch' && matrix.os == 'macos-latest' && env.MAC_CSC_LINK != '' && env.MAC_CSC_KEY_PASSWORD != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != '' }}
         env:
           CSC_LINK: ${{ env.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ env.MAC_CSC_KEY_PASSWORD }}
@@ -60,12 +64,12 @@ jobs:
         run: npm run release:github
 
       - name: Build And Publish (Signed Windows)
-        if: ${{ matrix.os == 'windows-latest' && env.WIN_CSC_LINK != '' && env.WIN_CSC_KEY_PASSWORD != '' }}
+        if: ${{ github.event_name != 'workflow_dispatch' && matrix.os == 'windows-latest' && env.WIN_CSC_LINK != '' && env.WIN_CSC_KEY_PASSWORD != '' }}
         env:
           CSC_LINK: ${{ env.WIN_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ env.WIN_CSC_KEY_PASSWORD }}
         run: npm run release:github
 
       - name: Build And Publish (Unsigned Fallback)
-        if: ${{ (matrix.os == 'macos-latest' && (env.MAC_CSC_LINK == '' || env.MAC_CSC_KEY_PASSWORD == '' || env.APPLE_ID == '' || env.APPLE_APP_SPECIFIC_PASSWORD == '' || env.APPLE_TEAM_ID == '')) || (matrix.os == 'windows-latest' && (env.WIN_CSC_LINK == '' || env.WIN_CSC_KEY_PASSWORD == '')) }}
+        if: ${{ github.event_name != 'workflow_dispatch' && ((matrix.os == 'macos-latest' && (env.MAC_CSC_LINK == '' || env.MAC_CSC_KEY_PASSWORD == '' || env.APPLE_ID == '' || env.APPLE_APP_SPECIFIC_PASSWORD == '' || env.APPLE_TEAM_ID == '')) || (matrix.os == 'windows-latest' && (env.WIN_CSC_LINK == '' || env.WIN_CSC_KEY_PASSWORD == ''))) }}
         run: npx cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run release:github
