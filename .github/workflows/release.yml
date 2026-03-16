@@ -20,6 +20,13 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -43,22 +50,22 @@ jobs:
         run: npm run test:regression
 
       - name: Build And Publish (Signed macOS)
-        if: ${{ matrix.os == 'macos-latest' && secrets.MAC_CSC_LINK != '' && secrets.MAC_CSC_KEY_PASSWORD != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        if: ${{ matrix.os == 'macos-latest' && env.MAC_CSC_LINK != '' && env.MAC_CSC_KEY_PASSWORD != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != '' }}
         env:
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ env.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ env.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ env.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ env.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
         run: npm run release:github
 
       - name: Build And Publish (Signed Windows)
-        if: ${{ matrix.os == 'windows-latest' && secrets.WIN_CSC_LINK != '' && secrets.WIN_CSC_KEY_PASSWORD != '' }}
+        if: ${{ matrix.os == 'windows-latest' && env.WIN_CSC_LINK != '' && env.WIN_CSC_KEY_PASSWORD != '' }}
         env:
-          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ env.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ env.WIN_CSC_KEY_PASSWORD }}
         run: npm run release:github
 
       - name: Build And Publish (Unsigned Fallback)
-        if: ${{ (matrix.os == 'macos-latest' && (secrets.MAC_CSC_LINK == '' || secrets.MAC_CSC_KEY_PASSWORD == '' || secrets.APPLE_ID == '' || secrets.APPLE_APP_SPECIFIC_PASSWORD == '' || secrets.APPLE_TEAM_ID == '')) || (matrix.os == 'windows-latest' && (secrets.WIN_CSC_LINK == '' || secrets.WIN_CSC_KEY_PASSWORD == '')) }}
+        if: ${{ (matrix.os == 'macos-latest' && (env.MAC_CSC_LINK == '' || env.MAC_CSC_KEY_PASSWORD == '' || env.APPLE_ID == '' || env.APPLE_APP_SPECIFIC_PASSWORD == '' || env.APPLE_TEAM_ID == '')) || (matrix.os == 'windows-latest' && (env.WIN_CSC_LINK == '' || env.WIN_CSC_KEY_PASSWORD == '')) }}
         run: npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish always -c.publish.provider=github
