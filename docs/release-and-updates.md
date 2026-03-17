@@ -1,67 +1,47 @@
-# Release And Auto-Update Guide
+# Release And Manual Update Guide
 
-## 1. How Auto-Update Works In This Project
+## 1. Current Update Strategy
 
-- Development mode (`npm run start`): update UI is available, but auto download/install is disabled by design.
-- Packaged app: checks remote release metadata, downloads update package in background, then allows `Restart And Install`.
+This project now uses **manual update only**:
 
-`electron-updater` never uses your local build artifacts on end-user machines.  
-Users download update packages from a remote release source.
+1. User clicks `检查更新` in the app.
+2. App checks remote release metadata.
+3. If a new version exists, app shows `打开下载页`.
+4. User downloads and installs manually.
 
-## 2. Do I Need GitHub?
+There is **no background package download** and **no restart-and-install flow**.
 
-Not mandatory, but you need **some remote host**:
+## 2. Update Sources
 
-- Option A: GitHub Releases (recommended first)
-- Option B: Your own server/CDN (generic provider)
+Configure one of the following runtime variables:
 
-This repo currently provides a GitHub Releases publishing workflow.
+- `MOYU_UPDATE_MANIFEST_URL` (JSON endpoint; must contain `version`)
+- `MOYU_UPDATE_GITHUB_REPO` (format: `owner/repo`, reads latest release)
 
-## 3. Signing / Notarization Requirements
+Optional:
 
-### macOS (strongly recommended to be treated as required)
+- `MOYU_UPDATE_HTTP_TIMEOUT_MS` (request timeout, milliseconds)
 
-- Developer ID Application certificate
-- Apple notarization credentials
-
-Without them, users usually see heavy security warnings and installation friction.
-
-### Windows (strongly recommended)
-
-- Code signing certificate (EV is best for SmartScreen reputation)
-
-Without signing, users commonly see `Unknown Publisher` / SmartScreen warnings.
-
-## 4. One-Time Setup
-
-1. Create a GitHub repository and push this project.
-2. Enable GitHub Actions for the repository.
-3. Add repository secrets:
-   - `CSC_LINK` (base64 p12 or cert file URL)
-   - `CSC_KEY_PASSWORD`
-   - `APPLE_ID`
-   - `APPLE_APP_SPECIFIC_PASSWORD`
-   - `APPLE_TEAM_ID`
-
-If you are not ready for signing yet, you can omit these secrets first.  
-The workflow can still publish unsigned packages (not recommended for public distribution).
-
-## 5. Release Flow
+## 3. Release Flow
 
 1. Bump `package.json` version.
-2. Commit and push.
-3. Create and push a tag that matches `package.json` version (example: version `1.0.1` -> tag `v1.0.1`).
-4. GitHub Actions `Release` workflow builds and publishes artifacts to GitHub Releases.
-5. Packaged apps will detect the new version and update automatically.
+2. Build and package:
+   - `npm run dist` (all configured targets)
+   - `npm run dist:mac`
+   - `npm run dist:win`
+3. Upload installer artifacts to your release channel.
+4. Users update by downloading and reinstalling.
 
-## 6. Useful Commands
+## 4. Signing Notes
 
-- Local package only (no publish, unsigned by default): `npm run dist`
-- Publish (requires GitHub context/token): `npm run release:github`
+- macOS and Windows signing are still recommended for distribution trust.
+- Since this project is manual update mode, unsigned builds can still be distributed for small-scale internal usage.
 
-## 7. Optional Runtime Environment Flags
+## 5. Health Checks
 
-- `MOYU_UPDATE_FEED_URL`: force a generic feed URL at runtime.
-- `MOYU_AUTO_UPDATE_CHECK_INTERVAL_MS`: periodic check interval.
-- `MOYU_AUTO_UPDATE_STARTUP_DELAY_MS`: delay before first startup check.
-- `MOYU_DEV_AUTO_UPDATE=true`: enable auto-updater path in development mode for debugging.
+Before release:
+
+- `npm run check`
+- `npm run test:regression`
+- `npm run build`
+

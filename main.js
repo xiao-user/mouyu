@@ -450,12 +450,6 @@ async function loadRendererEntry(window) {
     return;
   }
 
-  const legacyIndexPath = path.join(app.getAppPath(), 'index.legacy.html');
-  if (fs.existsSync(legacyIndexPath)) {
-    await window.loadFile(legacyIndexPath);
-    return;
-  }
-
   const fallbackHtml = `
     <html lang="zh-CN">
       <head><meta charset="utf-8" /></head>
