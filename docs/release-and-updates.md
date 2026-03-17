@@ -22,6 +22,24 @@ Optional:
 
 - `MOYU_UPDATE_HTTP_TIMEOUT_MS` (request timeout, milliseconds)
 
+Private repo note:
+
+- `MOYU_UPDATE_GITHUB_REPO` uses unauthenticated GitHub API in-app.
+- Private repos are not accessible from anonymous API requests.
+- Public repos may still hit API rate limits.
+- Recommended for production: set `MOYU_UPDATE_MANIFEST_URL` to a stable public JSON endpoint.
+
+Manifest JSON example:
+
+```json
+{
+  "version": "1.0.1",
+  "url": "https://your-download-host.example.com/Moyu-Reader-1.0.1.dmg",
+  "notes": "Bug fixes and performance improvements",
+  "publishedAt": "2026-03-17T00:00:00.000Z"
+}
+```
+
 ## 3. Release Flow
 
 1. Bump `package.json` version.
@@ -44,4 +62,3 @@ Before release:
 - `npm run check`
 - `npm run test:regression`
 - `npm run build`
-

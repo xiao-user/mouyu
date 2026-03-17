@@ -79,6 +79,13 @@ npm run build
 - `MOYU_UPDATE_GITHUB_REPO`：GitHub 仓库（格式：`owner/repo`，读取 latest release）
 - `MOYU_UPDATE_HTTP_TIMEOUT_MS`：更新请求超时（毫秒）
 
+私有仓库注意事项：
+
+- `MOYU_UPDATE_GITHUB_REPO` 通过匿名 GitHub API 获取 `latest release`，私有仓库会返回 404
+- 公开仓库也可能遇到匿名 API 限流（403）
+- 推荐在生产环境优先配置 `MOYU_UPDATE_MANIFEST_URL`
+- 示例清单可参考：`docs/update-manifest.example.json`
+
 ## 安全设计
 
 - 主窗口：`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`
@@ -118,4 +125,3 @@ npm run build
 
 - 支持 macOS / Windows（打包目标见 `package.json > build`）
 - 激活码流程当前为本地校验与本地存储，不含服务端验签
-

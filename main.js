@@ -275,6 +275,21 @@ function getGithubReleasePageUrl() {
   return `https://github.com/${UPDATE_GITHUB_REPO}/releases`;
 }
 
+function buildUpdateErrorMessage(error) {
+  const baseMessage = error instanceof Error && error.message ? error.message : String(error);
+
+  if (UPDATE_GITHUB_REPO) {
+    if (baseMessage.includes('HTTP 404')) {
+      return `更新检查失败：${baseMessage}（可能是仓库私有，或尚未创建 Release）`;
+    }
+    if (baseMessage.includes('rate limit exceeded') || baseMessage.includes('HTTP 403')) {
+      return `更新检查失败：${baseMessage}（GitHub API 匿名请求限流，建议配置 MOYU_UPDATE_MANIFEST_URL）`;
+    }
+  }
+
+  return `更新检查失败：${baseMessage}`;
+}
+
 async function checkForUpdatesManual() {
   const checkedAt = new Date().toISOString();
   const currentVersion = app.getVersion();
@@ -288,7 +303,8 @@ async function checkForUpdatesManual() {
       latestVersion: '',
       releaseUrl: '',
       source: '',
-      message: '未配置更新源（MOYU_UPDATE_MANIFEST_URL 或 MOYU_UPDATE_GITHUB_REPO）。',
+      message:
+        '未配置更新源（MOYU_UPDATE_MANIFEST_URL 或 MOYU_UPDATE_GITHUB_REPO）。如使用私有 GitHub 仓库，请优先配置 MOYU_UPDATE_MANIFEST_URL。',
     });
   }
 
@@ -333,7 +349,7 @@ async function checkForUpdatesManual() {
       latestVersion: '',
       releaseUrl: getGithubReleasePageUrl(),
       source: '',
-      message: `更新检查失败：${error instanceof Error && error.message ? error.message : String(error)}`,
+      message: buildUpdateErrorMessage(error),
     });
   }
 }
