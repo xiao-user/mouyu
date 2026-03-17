@@ -86,6 +86,18 @@ npm run build
 - 推荐在生产环境优先配置 `MOYU_UPDATE_MANIFEST_URL`
 - 示例清单可参考：`docs/update-manifest.example.json`
 
+私有仓库 + 公开 Manifest（推荐做法）：
+
+- 仓库已提供工作流：`.github/workflows/publish-manifest.yml`
+- 触发时机：Release `published` 或手动 `workflow_dispatch`
+- 作用：将 `update-manifest.json` 发布到公开 Gist，客户端只访问这个 Gist raw URL
+- 你需要在 GitHub 仓库中配置：
+- Secret `MOYU_MANIFEST_GIST_ID`：公开 Gist 的 ID
+- Secret `MOYU_MANIFEST_GIST_TOKEN`：具有 `gist` 权限的 PAT
+- Variable `MOYU_MANIFEST_FILE_NAME`（可选，默认 `update-manifest.json`）
+- Variable `MOYU_MANIFEST_URL`（可选，默认使用 release 页面链接）
+- 然后把应用运行环境变量 `MOYU_UPDATE_MANIFEST_URL` 指向该 Gist 的 raw URL
+
 ## 安全设计
 
 - 主窗口：`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`

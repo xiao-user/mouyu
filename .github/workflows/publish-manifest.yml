@@ -1,0 +1,50 @@
+name: Publish Update Manifest
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Manifest version (default: package.json version)"
+        required: false
+        type: string
+      url:
+        description: "Public download/release url"
+        required: false
+        type: string
+      notes:
+        description: "Release notes text"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Publish manifest to public gist
+        id: publish
+        env:
+          MOYU_MANIFEST_GIST_ID: ${{ secrets.MOYU_MANIFEST_GIST_ID }}
+          MOYU_MANIFEST_GIST_TOKEN: ${{ secrets.MOYU_MANIFEST_GIST_TOKEN }}
+          MOYU_MANIFEST_FILE_NAME: ${{ vars.MOYU_MANIFEST_FILE_NAME }}
+          MOYU_MANIFEST_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+          MOYU_MANIFEST_URL: ${{ inputs.url || vars.MOYU_MANIFEST_URL || (github.event_name == 'release' && github.event.release.html_url || '') }}
+          MOYU_MANIFEST_NOTES: ${{ inputs.notes || (github.event_name == 'release' && github.event.release.body || '') }}
+          MOYU_MANIFEST_PUBLISHED_AT: ${{ github.event_name == 'release' && github.event.release.published_at || '' }}
+        run: node scripts/publish-manifest-to-gist.js
+
+      - name: Print manifest URL
+        run: echo "manifest_url=${{ steps.publish.outputs.manifest_url }}"

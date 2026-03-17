@@ -50,6 +50,30 @@ Manifest JSON example:
 3. Upload installer artifacts to your release channel.
 4. Users update by downloading and reinstalling.
 
+## 3.1 Private Repo + Public Manifest (Gist)
+
+Use `.github/workflows/publish-manifest.yml` to publish manifest JSON to a public Gist.
+
+Required GitHub repository settings:
+
+- Secret: `MOYU_MANIFEST_GIST_ID`
+- Secret: `MOYU_MANIFEST_GIST_TOKEN` (PAT with `gist` scope)
+
+Optional GitHub repository settings:
+
+- Variable: `MOYU_MANIFEST_FILE_NAME` (default: `update-manifest.json`)
+- Variable: `MOYU_MANIFEST_URL` (default: release page URL)
+
+After workflow runs, set app runtime env:
+
+- `MOYU_UPDATE_MANIFEST_URL=<public gist raw url>`
+
+Manual dispatch inputs:
+
+- `version`
+- `url`
+- `notes`
+
 ## 4. Signing Notes
 
 - macOS and Windows signing are still recommended for distribution trust.
