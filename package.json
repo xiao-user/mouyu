@@ -1,6 +1,6 @@
 {
   "name": "moyu-reader",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "main": "main.js",
   "scripts": {
     "start": "node scripts/start-electron.js",
@@ -22,6 +22,10 @@
   "author": "",
   "license": "ISC",
   "description": "Moyu Reader desktop app with webview reading and manual update checks.",
+  "moyuUpdate": {
+    "manifestUrl": "https://gist.githubusercontent.com/xiao-user/62fba9f696b6b5ab663b192d0e7b80df/raw/update-manifest.json",
+    "githubRepo": "xiao-user/mouyu"
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.1",
     "@vitejs/plugin-react": "^6.0.0",

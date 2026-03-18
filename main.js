@@ -4,6 +4,12 @@ const path = require('path');
 const { compareVersions } = require('./lib/update-utils');
 const { IPC_CHANNELS } = require('./ipc-channels');
 
+const APP_PACKAGE_JSON = require('./package.json');
+const DEFAULT_UPDATE_CONFIG =
+  APP_PACKAGE_JSON && typeof APP_PACKAGE_JSON === 'object' && APP_PACKAGE_JSON.moyuUpdate
+    ? APP_PACKAGE_JSON.moyuUpdate
+    : {};
+
 let mainWindow;
 const SUPPORTED_ICON_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.icns']);
 const LICENSE_FILE_NAME = 'license-state.json';
@@ -19,8 +25,12 @@ const WEBVIEW_HOST_ALLOWLIST = new Set(
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
 );
-const UPDATE_MANIFEST_URL = String(process.env.MOYU_UPDATE_MANIFEST_URL || '').trim();
-const UPDATE_GITHUB_REPO = String(process.env.MOYU_UPDATE_GITHUB_REPO || '').trim();
+const UPDATE_MANIFEST_URL = String(
+  process.env.MOYU_UPDATE_MANIFEST_URL || DEFAULT_UPDATE_CONFIG.manifestUrl || ''
+).trim();
+const UPDATE_GITHUB_REPO = String(
+  process.env.MOYU_UPDATE_GITHUB_REPO || DEFAULT_UPDATE_CONFIG.githubRepo || ''
+).trim();
 const UPDATE_HTTP_TIMEOUT_MS = Number.parseInt(process.env.MOYU_UPDATE_HTTP_TIMEOUT_MS || '7000', 10);
 let updateState = {
   ok: true,

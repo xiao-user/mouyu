@@ -18,6 +18,8 @@ Configure one of the following runtime variables:
 - `MOYU_UPDATE_MANIFEST_URL` (JSON endpoint; must contain `version`)
 - `MOYU_UPDATE_GITHUB_REPO` (format: `owner/repo`, reads latest release)
 
+If runtime env vars are not set, app falls back to `package.json > moyuUpdate`.
+
 Optional:
 
 - `MOYU_UPDATE_HTTP_TIMEOUT_MS` (request timeout, milliseconds)
